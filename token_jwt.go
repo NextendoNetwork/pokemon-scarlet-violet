@@ -56,6 +56,9 @@ func nplnSigningKey() (*ecdsa.PrivateKey, string) {
 				}
 			}
 		}
+		if productionMode() {
+			return
+		}
 		k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 		if err != nil {
 			log.Printf("[NPLN Auth] ecdsa key error: %v", err)

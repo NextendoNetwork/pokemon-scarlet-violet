@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -88,6 +89,9 @@ func tenantOr(t string) string {
 }
 
 func gatedIdentity(ext *authpb.ExternalIdToken, tenant string) (uint64, string, error) {
+	if productionMode() {
+		return productionIdentity(ext, tenant)
+	}
 	tenant = tenantOr(tenant)
 	if pid, ok := localVioletPlayer(ext); ok {
 		return pid, tenant + "/users/u-violetdev" + strconv.FormatUint(pid, 10), nil
@@ -142,6 +146,24 @@ func gatedIdentity(ext *authpb.ExternalIdToken, tenant string) (uint64, string, 
 	return fallback("no matching local token found")
 }
 
+func productionIdentity(ext *authpb.ExternalIdToken, tenant string) (uint64, string, error) {
+	if tenant != "" && tenant != "tenants/current" && tenant != nplnTenant {
+		return 0, "", status.Error(codes.PermissionDenied, "tenant does not match Violet")
+	}
+	pid, ok := pidFromNnex(ext)
+	if !ok || pid == 0 {
+		return 0, "", status.Error(codes.Unauthenticated, "signed Nextendo account proof required")
+	}
+	account, err := accountFriends(pid)
+	if err != nil {
+		return 0, "", status.Error(codes.Unavailable, "Nextendo account lookup unavailable")
+	}
+	if account.PID != pid || !strings.HasPrefix(account.UserID, "u-") {
+		return 0, "", status.Error(codes.PermissionDenied, "account identity mismatch")
+	}
+	return pid, nplnTenant + "/users/" + account.UserID, nil
+}
+
 var identitesParUid = struct {
 	sync.Mutex
 	m map[string]uint64
@@ -168,13 +190,60 @@ func pidPourUid(uid string) uint64 {
 
 func newTokenPID(pid uint64, userPath string) *authpb.Token {
 	retenirIdentite(userPath, pid)
+	refresh := jetonRafraichissement(pid)
+	if productionMode() {
+		refresh = productionRefreshToken(pid, userPath)
+	}
 
 	return &authpb.Token{
 		User:         userPath,
 		AccessToken:  mintNplnAccessToken(pid, userPath, nplnTenant),
-		RefreshToken: jetonRafraichissement(pid),
+		RefreshToken: refresh,
 		Ttl:          durationpb.New(nplnTokenTTL),
 	}
+}
+
+const productionRefreshTTL = 24 * time.Hour
+
+func productionRefreshToken(pid uint64, userPath string) string {
+	body := fmt.Sprintf("violet-refresh-v2.%d.%d.%s", pid, time.Now().Add(productionRefreshTTL).Unix(), base64.RawURLEncoding.EncodeToString([]byte(userPath)))
+	mac := hmac.New(sha256.New, loadNextendoSecret())
+	mac.Write([]byte(body))
+	return body + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+}
+
+func parseProductionRefreshToken(token string) (uint64, string, bool) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 5 || parts[0] != "violet-refresh-v2" {
+		return 0, "", false
+	}
+	pid, err := strconv.ParseUint(parts[1], 10, 64)
+	if err != nil || pid == 0 {
+		return 0, "", false
+	}
+	expiry, err := strconv.ParseInt(parts[2], 10, 64)
+	if err != nil || time.Now().Unix() >= expiry {
+		return 0, "", false
+	}
+	userBytes, err := base64.RawURLEncoding.DecodeString(parts[3])
+	if err != nil || len(userBytes) == 0 {
+		return 0, "", false
+	}
+	userPath := string(userBytes)
+	if !strings.HasPrefix(userPath, nplnTenant+"/users/") {
+		return 0, "", false
+	}
+	secret := loadNextendoSecret()
+	if len(secret) == 0 {
+		return 0, "", false
+	}
+	mac := hmac.New(sha256.New, secret)
+	mac.Write([]byte(strings.Join(parts[:4], ".")))
+	signature, err := base64.RawURLEncoding.DecodeString(parts[4])
+	if err != nil || !hmac.Equal(signature, mac.Sum(nil)) {
+		return 0, "", false
+	}
+	return pid, userPath, true
 }
 
 func jetonRafraichissement(pid uint64) string {
@@ -223,6 +292,23 @@ func (s *authServer) IssueToken(ctx context.Context, req *authpb.IssueTokenReque
 }
 
 func (s *authServer) RefreshToken(ctx context.Context, req *authpb.RefreshTokenRequest) (*authpb.RefreshTokenResponse, error) {
+	if productionMode() {
+		pid, userPath, ok := parseProductionRefreshToken(req.GetRefreshToken())
+		if !ok || req.GetUser() != userPath {
+			return nil, status.Error(codes.Unauthenticated, "invalid refresh token")
+		}
+		if caller, authenticated := callerPID(ctx); authenticated && caller != pid {
+			return nil, status.Error(codes.PermissionDenied, "refresh identity mismatch")
+		}
+		account, err := accountFriends(pid)
+		if err != nil {
+			return nil, status.Error(codes.Unavailable, "Nextendo account lookup unavailable")
+		}
+		if account.PID != pid || userPath != nplnTenant+"/users/"+account.UserID {
+			return nil, status.Error(codes.PermissionDenied, "refresh account mismatch")
+		}
+		return &authpb.RefreshTokenResponse{Token: newTokenPID(pid, userPath)}, nil
+	}
 	pid, ok := callerPID(ctx)
 	if !ok || pid == 0 {
 		pid, ok = pidDuJetonRafraichissement(req.GetRefreshToken())
@@ -260,6 +346,9 @@ func (s *authServer) IssueAnonymousUserToken(ctx context.Context, req *authpb.Is
 func (s *authServer) ValidateToken(ctx context.Context, _ *emptypb.Empty) (*emptypb.Empty, error) {
 	pid, ok := callerPID(ctx)
 	if !ok || pid == 0 {
+		if productionMode() {
+			return nil, status.Error(codes.Unauthenticated, "valid access token required")
+		}
 		log.Printf("[NPLN Auth] ValidateToken anonymous/fallback -> OK")
 		return &emptypb.Empty{}, nil
 	}

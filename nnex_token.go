@@ -16,27 +16,29 @@ import (
 	authpb "npln.nintendo.net/npln-practice/proto/auth/v1"
 )
 
-var nextendoSecret = loadNextendoSecret()
-
 func loadNextendoSecret() []byte {
-	if v := os.Getenv("NEXTENDO_SECRET"); v != "" {
+	if v := os.Getenv("NEXTENDO_SECRET"); v != "" && !productionMode() {
 		return []byte(v)
 	}
 	path := envOr("NEXTENDO_SECRET_FILE", "accounts/nextendo_secret.key")
 	b, err := os.ReadFile(path)
 	if err != nil {
+		if productionMode() {
+			return nil
+		}
 		// Development fallback secret for local test suite
 		return []byte("violet-local-development-only-2026")
 	}
 	dec, derr := hex.DecodeString(strings.TrimSpace(string(b)))
-	if derr != nil || len(dec) < 16 {
-		return b
+	if derr == nil && len(dec) >= 16 {
+		return dec
 	}
-	return dec
+	return b
 }
 
 func nextendoPIDFromNexToken(s string) (uint64, bool) {
-	if len(nextendoSecret) == 0 || !strings.HasPrefix(s, "nx2.") {
+	secret := loadNextendoSecret()
+	if len(secret) == 0 || len(s) > 4096 || !strings.HasPrefix(s, "nx2.") {
 		return 0, false
 	}
 	parts := strings.Split(s[len("nx2."):], ".")
@@ -47,7 +49,7 @@ func nextendoPIDFromNexToken(s string) (uint64, bool) {
 	if err != nil {
 		return 0, false
 	}
-	mac := hmac.New(sha256.New, nextendoSecret)
+	mac := hmac.New(sha256.New, secret)
 	mac.Write([]byte("nex:" + string(raw)))
 	want := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 	if !hmac.Equal([]byte(want), []byte(parts[1])) {
@@ -61,7 +63,7 @@ func nextendoPIDFromNexToken(s string) (uint64, bool) {
 	if err != nil || pid == 0 {
 		return 0, false
 	}
-	if exp, eerr := strconv.ParseInt(f[2], 10, 64); eerr != nil || time.Now().Unix() > exp {
+	if exp, eerr := strconv.ParseInt(f[2], 10, 64); eerr != nil || time.Now().Unix() >= exp {
 		return 0, false
 	}
 	return pid, true

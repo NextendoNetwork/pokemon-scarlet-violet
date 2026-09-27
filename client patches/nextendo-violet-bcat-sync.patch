@@ -1,0 +1,403 @@
+diff --git a/src/Ryujinx.Horizon/Bcat/Ipc/ServiceCreator.cs b/src/Ryujinx.Horizon/Bcat/Ipc/ServiceCreator.cs
+index 26f3e30..51bc075 100644
+--- a/src/Ryujinx.Horizon/Bcat/Ipc/ServiceCreator.cs
++++ b/src/Ryujinx.Horizon/Bcat/Ipc/ServiceCreator.cs
+@@ -48,6 +48,12 @@ namespace Ryujinx.Horizon.Bcat.Ipc
+         [CmifCommand(1)]
+         public Result CreateDeliveryCacheStorageService(out IDeliveryCacheStorageService service, [ClientProcessId] ulong pid)
+         {
++            string seedRoot = BcatSeed.Root;
++            if (_arp != null && _arp.GetApplicationInstanceId(out ulong seedInstance, pid).IsSuccess &&
++                _arp.GetApplicationLaunchProperty(out ApplicationLaunchProperty seedProperty, seedInstance).IsSuccess)
++            {
++                seedRoot = BcatSeed.RootForTitle(seedProperty.ApplicationId.Id);
++            }
+             using SharedRef<LibHac.Bcat.Impl.Ipc.IDeliveryCacheStorageService> libHacService = new();
+ 
+             LibHac.Result resultCode = _libHacService.Get.CreateDeliveryCacheStorageService(ref libHacService.Ref, pid);
+@@ -87,7 +93,7 @@ namespace Ryujinx.Horizon.Bcat.Ipc
+ 
+             if (resultCode.IsSuccess())
+             {
+-                service = new DeliveryCacheStorageService(ref libHacService.Ref);
++                service = new DeliveryCacheStorageService(ref libHacService.Ref, seedRoot);
+             }
+             else
+             {
+@@ -111,7 +117,7 @@ namespace Ryujinx.Horizon.Bcat.Ipc
+ 
+             if (resultCode.IsSuccess())
+             {
+-                service = new DeliveryCacheStorageService(ref libHacService.Ref);
++                service = new DeliveryCacheStorageService(ref libHacService.Ref, BcatSeed.RootForTitle(applicationId.Id));
+             }
+             else
+             {
+diff --git a/src/Ryujinx.Horizon/Bcat/Ipc/ServiceCreator/BcatSeed.cs b/src/Ryujinx.Horizon/Bcat/Ipc/ServiceCreator/BcatSeed.cs
+index 2f42d73..e717983 100644
+--- a/src/Ryujinx.Horizon/Bcat/Ipc/ServiceCreator/BcatSeed.cs
++++ b/src/Ryujinx.Horizon/Bcat/Ipc/ServiceCreator/BcatSeed.cs
+@@ -22,6 +22,9 @@ namespace Ryujinx.Horizon.Bcat.Ipc
+         // keeps this single writable location current from the server, so it is the only source read.
+         public static string Root => System.IO.Path.Combine(AppDataManager.BaseDirPath, "bcat-seed");
+ 
++        public static string RootForTitle(ulong titleId) => titleId == 0x01008F6008C5E000
++            ? System.IO.Path.Combine(Root, "01008f6008c5e000") : Root;
++
+         public static string DirPath(string dir) => System.IO.Path.Combine(Root, dir);
+ 
+         public static string FilePath(string dir, string file) => System.IO.Path.Combine(Root, dir, file);
+diff --git a/src/Ryujinx.Horizon/Bcat/Ipc/ServiceCreator/DeliveryCacheDirectoryService.cs b/src/Ryujinx.Horizon/Bcat/Ipc/ServiceCreator/DeliveryCacheDirectoryService.cs
+index bd04b50..49aadd7 100644
+--- a/src/Ryujinx.Horizon/Bcat/Ipc/ServiceCreator/DeliveryCacheDirectoryService.cs
++++ b/src/Ryujinx.Horizon/Bcat/Ipc/ServiceCreator/DeliveryCacheDirectoryService.cs
+@@ -14,10 +14,12 @@ namespace Ryujinx.Horizon.Bcat.Ipc
+         private SharedRef<LibHac.Bcat.Impl.Ipc.IDeliveryCacheDirectoryService> _libHacService;
+         private int _disposalState;
+         private string _seedDir;
++        private readonly string _seedRoot;
+ 
+-        public DeliveryCacheDirectoryService(ref SharedRef<LibHac.Bcat.Impl.Ipc.IDeliveryCacheDirectoryService> libHacService)
++        public DeliveryCacheDirectoryService(ref SharedRef<LibHac.Bcat.Impl.Ipc.IDeliveryCacheDirectoryService> libHacService, string seedRoot = null)
+         {
+             _libHacService = SharedRef<LibHac.Bcat.Impl.Ipc.IDeliveryCacheDirectoryService>.CreateMove(ref libHacService);
++            _seedRoot = seedRoot ?? BcatSeed.Root;
+         }
+ 
+         [CmifCommand(0)]
+@@ -25,7 +27,7 @@ namespace Ryujinx.Horizon.Bcat.Ipc
+         {
+             string name = BcatSeed.ToName(ref directoryName);
+             Result res = _libHacService.Get.Open(ref directoryName).Horizon;
+-            if (res.IsFailure && System.IO.Directory.Exists(BcatSeed.DirPath(name)))
++            if (res.IsFailure && System.IO.Directory.Exists(System.IO.Path.Combine(_seedRoot, name)))
+             {
+                 _seedDir = name;
+                 res = Result.Success;
+@@ -39,7 +41,7 @@ namespace Ryujinx.Horizon.Bcat.Ipc
+         {
+             if (_seedDir != null)
+             {
+-                string[] files = System.IO.Directory.GetFiles(BcatSeed.DirPath(_seedDir));
++                string[] files = System.IO.Directory.GetFiles(System.IO.Path.Combine(_seedRoot, _seedDir));
+                 int n = Math.Min(files.Length, entriesBuffer.Length);
+                 for (int i = 0; i < n; i++)
+                 {
+@@ -61,7 +63,7 @@ namespace Ryujinx.Horizon.Bcat.Ipc
+         {
+             if (_seedDir != null)
+             {
+-                count = System.IO.Directory.GetFiles(BcatSeed.DirPath(_seedDir)).Length;
++                count = System.IO.Directory.GetFiles(System.IO.Path.Combine(_seedRoot, _seedDir)).Length;
+                 Ryujinx.Common.Logging.Logger.Info?.Print(Ryujinx.Common.Logging.LogClass.ServiceBcat, $"[SEED] DirectoryService.GetCount(seed) count={count}");
+                 return Result.Success;
+             }
+diff --git a/src/Ryujinx.Horizon/Bcat/Ipc/ServiceCreator/DeliveryCacheFileService.cs b/src/Ryujinx.Horizon/Bcat/Ipc/ServiceCreator/DeliveryCacheFileService.cs
+index f7c71f2..f4f58d5 100644
+--- a/src/Ryujinx.Horizon/Bcat/Ipc/ServiceCreator/DeliveryCacheFileService.cs
++++ b/src/Ryujinx.Horizon/Bcat/Ipc/ServiceCreator/DeliveryCacheFileService.cs
+@@ -14,10 +14,12 @@ namespace Ryujinx.Horizon.Bcat.Ipc
+         private SharedRef<LibHac.Bcat.Impl.Ipc.IDeliveryCacheFileService> _libHacService;
+         private int _disposalState;
+         private string _seedPath;
++        private readonly string _seedRoot;
+ 
+-        public DeliveryCacheFileService(ref SharedRef<LibHac.Bcat.Impl.Ipc.IDeliveryCacheFileService> libHacService)
++        public DeliveryCacheFileService(ref SharedRef<LibHac.Bcat.Impl.Ipc.IDeliveryCacheFileService> libHacService, string seedRoot = null)
+         {
+             _libHacService = SharedRef<LibHac.Bcat.Impl.Ipc.IDeliveryCacheFileService>.CreateMove(ref libHacService);
++            _seedRoot = seedRoot ?? BcatSeed.Root;
+         }
+ 
+         [CmifCommand(0)]
+@@ -26,9 +28,9 @@ namespace Ryujinx.Horizon.Bcat.Ipc
+             string dn = BcatSeed.ToName(ref directoryName);
+             string fn = BcatSeed.ToName(ref fileName);
+             Result res = _libHacService.Get.Open(ref directoryName, ref fileName).Horizon;
+-            if (res.IsFailure && System.IO.File.Exists(BcatSeed.FilePath(dn, fn)))
++            if (res.IsFailure && System.IO.File.Exists(System.IO.Path.Combine(_seedRoot, dn, fn)))
+             {
+-                _seedPath = BcatSeed.FilePath(dn, fn);
++                _seedPath = System.IO.Path.Combine(_seedRoot, dn, fn);
+                 res = Result.Success;
+             }
+             Ryujinx.Common.Logging.Logger.Info?.Print(Ryujinx.Common.Logging.LogClass.ServiceBcat, $"[SEED] FileService.Open dir='{dn}' file='{fn}' -> {res} (seed={_seedPath != null})");
+diff --git a/src/Ryujinx.Horizon/Bcat/Ipc/ServiceCreator/DeliveryCacheStorageService.cs b/src/Ryujinx.Horizon/Bcat/Ipc/ServiceCreator/DeliveryCacheStorageService.cs
+index bffd3f2..7f5bbc6 100644
+--- a/src/Ryujinx.Horizon/Bcat/Ipc/ServiceCreator/DeliveryCacheStorageService.cs
++++ b/src/Ryujinx.Horizon/Bcat/Ipc/ServiceCreator/DeliveryCacheStorageService.cs
+@@ -5,6 +5,7 @@ using Ryujinx.Horizon.Sdk.Bcat;
+ using Ryujinx.Horizon.Sdk.Sf;
+ using Ryujinx.Horizon.Sdk.Sf.Hipc;
+ using System;
++using System.Linq;
+ using System.Threading;
+ 
+ namespace Ryujinx.Horizon.Bcat.Ipc
+@@ -13,10 +14,12 @@ namespace Ryujinx.Horizon.Bcat.Ipc
+     {
+         private SharedRef<LibHac.Bcat.Impl.Ipc.IDeliveryCacheStorageService> _libHacService;
+         private int _disposalState;
++        private readonly string _seedRoot;
+ 
+-        public DeliveryCacheStorageService(ref SharedRef<LibHac.Bcat.Impl.Ipc.IDeliveryCacheStorageService> libHacService)
++        public DeliveryCacheStorageService(ref SharedRef<LibHac.Bcat.Impl.Ipc.IDeliveryCacheStorageService> libHacService, string seedRoot = null)
+         {
+             _libHacService = SharedRef<LibHac.Bcat.Impl.Ipc.IDeliveryCacheStorageService>.CreateMove(ref libHacService);
++            _seedRoot = seedRoot ?? BcatSeed.Root;
+         }
+ 
+         [CmifCommand(0)]
+@@ -28,7 +31,7 @@ namespace Ryujinx.Horizon.Bcat.Ipc
+ 
+             if (resultCode.IsSuccess())
+             {
+-                service = new DeliveryCacheFileService(ref libHacService.Ref);
++                service = new DeliveryCacheFileService(ref libHacService.Ref, _seedRoot);
+             }
+             else
+             {
+@@ -47,7 +50,7 @@ namespace Ryujinx.Horizon.Bcat.Ipc
+ 
+             if (resultCode.IsSuccess())
+             {
+-                service = new DeliveryCacheDirectoryService(ref libHacService.Ref);
++                service = new DeliveryCacheDirectoryService(ref libHacService.Ref, _seedRoot);
+             }
+             else
+             {
+@@ -67,9 +70,10 @@ namespace Ryujinx.Horizon.Bcat.Ipc
+             // celui qu'il cherche — le repli de DeliveryCacheDirectoryService.Open, lui, ne se
+             // declenche qu'a l'ouverture, donc trop tard. On complete ici avec ce que porte
+             // reellement le dossier bcat-seed.
+-            if (count == 0 && System.IO.Directory.Exists(BcatSeed.Root))
++            if (count == 0 && System.IO.Directory.Exists(_seedRoot))
+             {
+-                string[] dirs = System.IO.Directory.GetDirectories(BcatSeed.Root);
++                string[] dirs = System.IO.Directory.GetDirectories(_seedRoot)
++                    .Where(dir => _seedRoot != BcatSeed.Root || System.IO.Path.GetFileName(dir) != "01008f6008c5e000").ToArray();
+                 int n = System.Math.Min(dirs.Length, directoryNames.Length);
+                 for (int i = 0; i < n; i++)
+                 {
+diff --git a/src/Ryujinx/Common/NextendoByamlSync.cs b/src/Ryujinx/Common/NextendoByamlSync.cs
+index 8fa82ca..6de6c1c 100644
+--- a/src/Ryujinx/Common/NextendoByamlSync.cs
++++ b/src/Ryujinx/Common/NextendoByamlSync.cs
+@@ -36,6 +36,8 @@ namespace Ryujinx.Ava.Common
+         // failed with "download failed" — likewise under Program Files on Windows. AppDataManager's
+         // base dir is always writable (and portable-mode aware).
+         private static string SeedRoot => Path.Combine(AppDataManager.BaseDirPath, "bcat-seed");
++        private static bool IsViolet(ApplicationData app) => app?.IdBaseString == "01008f6008c5e000";
++        private static string VioletSeedRoot => Path.Combine(SeedRoot, "01008f6008c5e000");
+ 
+         // [Nextendo] Legacy next-to-exe seed location REMOVED: it let a stale copy shadow the live
+         // writable one (wrong Splatoon 2 rotation) and was copied to other emulators. Only SeedRoot
+@@ -52,6 +54,11 @@ namespace Ryujinx.Ava.Common
+                 return false;
+             }
+ 
++            if (IsViolet(app))
++            {
++                return Directory.Exists(VioletSeedRoot) && Directory.EnumerateFiles(VioletSeedRoot, "*", SearchOption.AllDirectories).Any();
++            }
++
+             // vsdata/VSSetting_0.byaml is the load-bearing schedule file (writable, server-synced).
+             return File.Exists(Path.Combine(SeedRoot, "vsdata", "VSSetting_0.byaml"));
+         }
+@@ -122,6 +129,11 @@ namespace Ryujinx.Ava.Common
+                 return false;
+             }
+ 
++            if (IsViolet(app))
++            {
++                return await EnsureVioletBcatAsync();
++            }
++
+             try
+             {
+                 using HttpClient http = new() { Timeout = TimeSpan.FromSeconds(15) };
+@@ -261,6 +273,11 @@ namespace Ryujinx.Ava.Common
+                 return false;
+             }
+ 
++            if (IsViolet(app))
++            {
++                return await EnsureVioletBcatAsync(force: true);
++            }
++
+             string tmpZip = Path.Combine(Path.GetTempPath(), $"nextendo_byaml_{app.IdString}.zip");
+             bool ok = false;
+ 
+@@ -340,5 +357,45 @@ namespace Ryujinx.Ava.Common
+             await dialog.ShowAsync(true);
+             return ok;
+         }
++
++        private static async Task<bool> EnsureVioletBcatAsync(bool force = false)
++        {
++            string versionPath = Path.Combine(AppDataManager.BaseDirPath, "nextendo_bcat_version_01008f6008c5e000.txt");
++            try
++            {
++                using HttpClient http = new() { Timeout = TimeSpan.FromSeconds(15) };
++                NextendoApi.AddAppHeader(http);
++                if (!string.IsNullOrEmpty(NextendoAccount.NexToken))
++                {
++                    http.DefaultRequestHeaders.Add("Authorization", "Bearer " + NextendoAccount.NexToken);
++                }
++                using HttpResponseMessage response = await http.GetAsync($"{BaseUrl()}/api/bcat/01008f6008c5e000", HttpCompletionOption.ResponseHeadersRead);
++                // An event is optional: an empty event store must not prevent launching Violet.
++                if (response.StatusCode == System.Net.HttpStatusCode.NotFound) return false;
++                response.EnsureSuccessStatusCode();
++                using Stream remote = await response.Content.ReadAsStreamAsync();
++                using MemoryStream bytes = new();
++                byte[] buffer = new byte[65536];
++                int read;
++                while ((read = await remote.ReadAsync(buffer)) != 0)
++                {
++                    if (bytes.Length + read > 16 * 1024 * 1024) throw new InvalidDataException("Violet BCAT package exceeds 16 MiB.");
++                    bytes.Write(buffer, 0, read);
++                }
++                byte[] zip = bytes.ToArray();
++                string hash = Convert.ToHexString(SHA256.HashData(zip));
++                if (!force && File.Exists(versionPath) && File.ReadAllText(versionPath).Trim() == hash &&
++                    Directory.Exists(VioletSeedRoot) && Directory.EnumerateFiles(VioletSeedRoot, "*", SearchOption.AllDirectories).Any()) return false;
++                Ryujinx.Common.NextendoVioletBcat.Install(zip, VioletSeedRoot);
++                File.WriteAllText(versionPath, hash);
++                Logger.Info?.Print(LogClass.Application, $"[Nextendo] Violet BCAT updated ({zip.Length} B, hash {hash[..8]}).");
++                return true;
++            }
++            catch (Exception ex)
++            {
++                Logger.Warning?.Print(LogClass.Application, $"[Nextendo] Violet BCAT update failed; using local event: {ex.Message}");
++                return false;
++            }
++        }
+     }
+ }
+diff --git a/src/Ryujinx/Systems/AppLibrary/ApplicationData.cs b/src/Ryujinx/Systems/AppLibrary/ApplicationData.cs
+index b72883e..aa9c52a 100644
+--- a/src/Ryujinx/Systems/AppLibrary/ApplicationData.cs
++++ b/src/Ryujinx/Systems/AppLibrary/ApplicationData.cs
+@@ -390,6 +390,7 @@ namespace Ryujinx.Ava.Systems.AppLibrary
+             // salon, c'est le desynchronisation assuree. Une seule version supportee a la fois,
+             // comme pour les autres titres.
+             "0100c2500fc20000" => "11.3.0", // Splatoon 3
++            "01008f6008c5e000" => "4.0.0",  // Pokémon Violet
+             // [Nextendo 2026-09-08] Super Mario Bros. Wonder. Les correctifs integres (contournement
+             // du certificat epingle + deux rejets de nom de pair) sont lies a l'identifiant de build
+             // FF773E90972D544EB79406EAA65396D53C43EFB9, propre a cette version exacte : une autre
+@@ -501,7 +502,7 @@ namespace Ryujinx.Ava.Systems.AppLibrary
+         [JsonIgnore]
+         public bool RequiresNextendoByaml => IdBaseString switch
+         {
+-            "0100f8f0000a2000" or "01003bc0000a0000" or "01003c700009c800" => true,
++            "0100f8f0000a2000" or "01003bc0000a0000" or "01003c700009c800" or "01008f6008c5e000" => true,
+             _ => false,
+         };
+ 
+--- /dev/null
++++ b/src/Ryujinx.Common/NextendoVioletBcat.cs
+@@ -0,0 +1,60 @@
++using System;
++using System.Collections.Generic;
++using System.IO;
++using System.IO.Compression;
++using System.Linq;
++
++namespace Ryujinx.Common
++{
++    public static class NextendoVioletBcat
++    {
++        public static void Install(byte[] zip, string target)
++        {
++            using MemoryStream bytes = new(zip);
++            using ZipArchive archive = new(bytes, ZipArchiveMode.Read);
++            if (archive.Entries.Count > 512) throw new InvalidDataException("Too many BCAT entries.");
++            HashSet<string> names = new(StringComparer.OrdinalIgnoreCase);
++            long total = 0;
++            foreach (ZipArchiveEntry entry in archive.Entries)
++            {
++                string name = entry.FullName;
++                string[] parts = name.TrimEnd('/').Split('/');
++                bool isDir = name.EndsWith('/');
++                if ((isDir ? parts.Length != 1 : parts.Length != 2) ||
++                    parts.Any(p => p.Length == 0 || p.Length > 31 || p == "." || p == ".." ||
++                        p.Any(c => !char.IsAsciiLetterOrDigit(c) && c != '_' && c != '-' && c != '.')) ||
++                    !names.Add(name) || ((entry.ExternalAttributes >> 16) & 0xF000) == 0xA000)
++                    throw new InvalidDataException("Invalid Violet BCAT path.");
++                total += entry.Length;
++                if (total > 32 * 1024 * 1024) throw new InvalidDataException("Expanded BCAT exceeds 32 MiB.");
++            }
++            if (total == 0) throw new InvalidDataException("Empty BCAT package.");
++            target = Path.GetFullPath(target);
++            Directory.CreateDirectory(Path.GetDirectoryName(target));
++            string stage = target + ".stage-" + Guid.NewGuid().ToString("N");
++            string backup = target + ".backup-" + Guid.NewGuid().ToString("N");
++            bool moved = false;
++            try
++            {
++                Directory.CreateDirectory(stage);
++                archive.ExtractToDirectory(stage);
++                if (Directory.Exists(target))
++                {
++                    Directory.Move(target, backup);
++                    moved = true;
++                }
++                try { Directory.Move(stage, target); }
++                catch
++                {
++                    if (moved) Directory.Move(backup, target);
++                    throw;
++                }
++                if (moved) Directory.Delete(backup, recursive: true);
++            }
++            finally
++            {
++                if (Directory.Exists(stage)) Directory.Delete(stage, recursive: true);
++            }
++        }
++    }
++}
+--- /dev/null
++++ b/src/Ryujinx.Tests/HLE/VioletBcatTests.cs
+@@ -0,0 +1,40 @@
++using NUnit.Framework;
++using Ryujinx.Common;
++using System;
++using System.IO;
++using System.IO.Compression;
++using System.Text;
++
++namespace Ryujinx.Tests.HLE
++{
++    public class VioletBcatTests
++    {
++        private static byte[] Package(string path, string content)
++        {
++            using MemoryStream stream = new();
++            using (ZipArchive zip = new(stream, ZipArchiveMode.Create, leaveOpen: true))
++            using (Stream entry = zip.CreateEntry(path).Open()) entry.Write(Encoding.ASCII.GetBytes(content));
++            return stream.ToArray();
++        }
++
++        [Test]
++        public void ReplacesOnlyVioletAndKeepsOldEventOnInvalidArchive()
++        {
++            string root = Path.Combine(Path.GetTempPath(), "violet-bcat-test-" + Guid.NewGuid().ToString("N"));
++            Directory.CreateDirectory(Path.Combine(root, "vsdata"));
++            File.WriteAllText(Path.Combine(root, "vsdata", "VSSetting_0.byaml"), "Splatoon");
++            string violet = Path.Combine(root, "01008f6008c5e000");
++            try
++            {
++                NextendoVioletBcat.Install(Package("raid/old", "old event"), violet);
++                Assert.Throws<InvalidDataException>(() => NextendoVioletBcat.Install(Package("../outside", "bad"), violet));
++                Assert.That(File.ReadAllText(Path.Combine(violet, "raid", "old")), Is.EqualTo("old event"));
++                NextendoVioletBcat.Install(Package("raid/current", "new event"), violet);
++                Assert.That(File.Exists(Path.Combine(violet, "raid", "old")), Is.False);
++                Assert.That(File.ReadAllText(Path.Combine(violet, "raid", "current")), Is.EqualTo("new event"));
++                Assert.That(File.ReadAllText(Path.Combine(root, "vsdata", "VSSetting_0.byaml")), Is.EqualTo("Splatoon"));
++            }
++            finally { Directory.Delete(root, recursive: true); }
++        }
++    }
++}

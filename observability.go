@@ -73,6 +73,12 @@ type probeRecorder struct {
 
 var violetProbe = newProbeRecorder()
 
+// VIOLET_DEBUG is deliberately opt-in. Ordinary clients must never create
+// full RPC payload captures or the unbounded per-request event log.
+func violetDebugEnabled() bool {
+	return os.Getenv("VIOLET_DEBUG") == "1"
+}
+
 func newProbeRecorder() *probeRecorder {
 	dir := envOr("VIOLET_PROBE_DIR", "runtime/logs")
 	return &probeRecorder{
@@ -82,6 +88,9 @@ func newProbeRecorder() *probeRecorder {
 }
 
 func (r *probeRecorder) record(event probeEvent) {
+	if !violetDebugEnabled() {
+		return
+	}
 	if event.Timestamp.IsZero() {
 		event.Timestamp = time.Now().UTC()
 	}
@@ -96,11 +105,11 @@ func (r *probeRecorder) record(event probeEvent) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if err := os.MkdirAll(r.dir, 0o755); err != nil {
+	if err := os.MkdirAll(r.dir, 0o700); err != nil {
 		log.Printf("[NPLN PROBE] cannot create %s: %v", r.dir, err)
 		return
 	}
-	f, err := os.OpenFile(r.eventsPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	f, err := os.OpenFile(r.eventsPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		log.Printf("[NPLN PROBE] cannot open event log: %v", err)
 		return
@@ -147,6 +156,9 @@ func (r *probeRecorder) forgetConnection(remote string) {
 }
 
 func (r *probeRecorder) capturePayload(event probeEvent, payload []byte, jsonPayload []byte) {
+	if !violetDebugEnabled() {
+		return
+	}
 	sum := sha256.Sum256(payload)
 	event.PayloadLength = len(payload)
 	event.PayloadSHA256 = hex.EncodeToString(sum[:])
@@ -158,14 +170,14 @@ func (r *probeRecorder) capturePayload(event probeEvent, payload []byte, jsonPay
 	}
 	base := fmt.Sprintf("%06d_%s_%s", sequence, sanitizeCaptureName(event.Direction), sanitizeCaptureName(label))
 	payloadDir := filepath.Join(r.dir, "payloads")
-	if err := os.MkdirAll(payloadDir, 0o755); err != nil {
+	if err := os.MkdirAll(payloadDir, 0o700); err != nil {
 		event.Error = joinProbeError(event.Error, fmt.Sprintf("create payload directory: %v", err))
 		r.record(event)
 		return
 	}
 
 	binPath := filepath.Join(payloadDir, base+".bin")
-	if err := os.WriteFile(binPath, payload, 0o644); err != nil {
+	if err := os.WriteFile(binPath, payload, 0o600); err != nil {
 		event.Error = joinProbeError(event.Error, fmt.Sprintf("write payload: %v", err))
 	} else {
 		event.PayloadFile = relativeCapturePath(r.dir, binPath)
@@ -173,7 +185,7 @@ func (r *probeRecorder) capturePayload(event probeEvent, payload []byte, jsonPay
 
 	if len(jsonPayload) > 0 {
 		jsonPath := filepath.Join(payloadDir, base+".json")
-		if err := os.WriteFile(jsonPath, jsonPayload, 0o644); err != nil {
+		if err := os.WriteFile(jsonPath, jsonPayload, 0o600); err != nil {
 			event.Error = joinProbeError(event.Error, fmt.Sprintf("write JSON payload: %v", err))
 		} else {
 			event.PayloadJSONFile = relativeCapturePath(r.dir, jsonPath)
@@ -190,12 +202,12 @@ func (r *probeRecorder) appendProbeIndex(event probeEvent) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if err := os.MkdirAll(r.dir, 0o755); err != nil {
+	if err := os.MkdirAll(r.dir, 0o700); err != nil {
 		log.Printf("[NPLN PROBE] cannot create %s: %v", r.dir, err)
 		return
 	}
 	path := filepath.Join(r.dir, "violet_rpc_probe.log")
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		log.Printf("[NPLN PROBE] cannot open RPC index: %v", err)
 		return
@@ -222,6 +234,9 @@ func (r *probeRecorder) captureWire(direction, messageType string, payload []byt
 }
 
 func (r *probeRecorder) captureMessage(ctx context.Context, direction, method string, message any) {
+	if !violetDebugEnabled() {
+		return
+	}
 	event := eventFromContext(ctx, "grpc_message")
 	event.Direction = direction
 	event.Method = method

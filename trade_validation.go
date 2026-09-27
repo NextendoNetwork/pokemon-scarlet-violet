@@ -76,6 +76,9 @@ func loadOrCreateTradeValidationKey(path string) (*rsa.PrivateKey, error) {
 		return nil, fmt.Errorf("read trade validation key: %w", err)
 	}
 
+	if productionMode() {
+		return nil, errors.New("trade validation key is required in production")
+	}
 	key, err := rsa.GenerateKey(rand.Reader, tradeSignatureSize*8)
 	if err != nil {
 		return nil, fmt.Errorf("generate trade validation key: %w", err)

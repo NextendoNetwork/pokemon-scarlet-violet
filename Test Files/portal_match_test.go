@@ -72,3 +72,60 @@ func TestPortalPairing(t *testing.T) {
 		t.Fatal("modes share pool")
 	}
 }
+
+func TestLinkBattleRetryUsesNewSession(t *testing.T) {
+	m := newMatchmaker(newSessionRegistry())
+	create := func(uid string) *mmpb.MatchmakingTicket {
+		t.Helper()
+		ticket, err := m.CreateMatchmakingTicket(violetAuthenticatedContext(uid),
+			&mmpb.CreateMatchmakingTicketRequest{MatchmakingTicket: &mmpb.MatchmakingTicket{
+				MatchmakingConfig: "NbrSingle",
+				UserDefinitions: []*mmpb.UserDefinition{{
+					User: "users/current",
+					Attributes: &commonpb.MapValue{Fields: map[string]*commonpb.Value{
+						"password": gamesyncStringValue("22446688"),
+					}},
+				}},
+			}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ticket
+	}
+	complete := func(uid string, ticket *mmpb.MatchmakingTicket) *mmpb.MatchmakingTicket {
+		t.Helper()
+		result, ok := m.completeMatchmakingTicket(violetAuthenticatedContext(uid), ticket.Name, nil)
+		if !ok {
+			t.Fatal("completion failed")
+		}
+		return result
+	}
+
+	first := create("u-first")
+	if got := complete("u-first", first).State; got != mmpb.MatchmakingTicket_SEARCHING {
+		t.Fatalf("first search state = %s", got)
+	}
+	second := create("u-second")
+	previous := complete("u-second", second).GameSession.GetName()
+	if previous == "" || complete("u-first", first).GameSession.GetName() != previous {
+		t.Fatal("first pair did not share a session")
+	}
+
+	retry := create("u-first")
+	if got := complete("u-first", retry).State; got != mmpb.MatchmakingTicket_SEARCHING {
+		t.Fatalf("retry state = %s, want SEARCHING", got)
+	}
+	m.mu.Lock()
+	retrySession := m.ticketSessions[lastResourceSegment(retry.Name)]
+	m.mu.Unlock()
+	if retrySession == nil || retrySession.gameSession.GetName() == previous {
+		t.Fatal("retry reused the completed battle session")
+	}
+	peerRetry := create("u-second")
+	result := complete("u-second", peerRetry)
+	if result.State != mmpb.MatchmakingTicket_SUCCEEDED ||
+		result.GameSession.GetName() != retrySession.gameSession.GetName() ||
+		result.GameSession.GetCurrentParticipantCount() != 2 {
+		t.Fatal("retry pair did not join a fresh two-player session")
+	}
+}

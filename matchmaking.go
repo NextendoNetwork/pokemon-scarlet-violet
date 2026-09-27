@@ -104,7 +104,7 @@ func matchmakingSessionProperties(config string) *commonpb.MapValue {
 const violetUnionCircleConfig = "TeamCircle"
 
 func validateVioletMatchmakingConfig(config string) error {
-	if lastResourceSegment(config) != violetUnionCircleConfig && lastResourceSegment(config) != "RaidPublic" && !violetPairConfig(config) {
+	if lastResourceSegment(config) != violetUnionCircleConfig && lastResourceSegment(config) != "RaidPublic" && lastResourceSegment(config) != "RaidPrivate" && !violetPairConfig(config) {
 		return status.Errorf(codes.Unimplemented, "matchmaking configuration %q is not part of the observed Violet contract", lastResourceSegment(config))
 	}
 	return nil
@@ -259,11 +259,45 @@ func (m *matchmakerServer) selectPublicMatchSessionLocked(ticket *mmpb.Matchmaki
 	if required < 1 {
 		required = 1
 	}
+	if lastResourceSegment(ticket.GetMatchmakingConfig()) == "RaidPublic" {
+		// Random raid search joins a live crystal host; it must never create
+		// a room whose only member is a searching participant.
+		for id, gs := range m.registry.sessions {
+			if m.registry.configs[gs.Name] != "RaidPublic" || !gs.IsPublic ||
+				gs.State != mmpb.GameSession_ACTIVE || !gs.CanParticipate ||
+				gs.CurrentParticipantCount+required > gs.MaxParticipantCount || sessionHasUID(gs, callerUID) {
+				continue
+			}
+			hasOwner := false
+			for _, member := range gs.UserSessions {
+				if member.State == mmpb.UserSession_ACTIVE && member.Team == "owner" {
+					hasOwner = true
+				}
+			}
+			if !hasOwner {
+				continue
+			}
+			session := m.registry.pooled[id]
+			if session == nil {
+				session = &publicMatchSession{poolKey: poolKey, gameSession: gs}
+				for _, member := range gs.UserSessions {
+					session.members = append(session.members, &publicMatchMember{
+						definition:  &mmpb.UserDefinition{User: member.User, Team: member.Team, Attributes: member.Attributes, LatencyData: member.LatencyData},
+						userSession: member.Name,
+					})
+				}
+				m.registry.pooled[id] = session
+			}
+			return session
+		}
+		return nil
+	}
 
 	// A repeated ticket from the same user must resolve to its existing
 	// membership instead of consuming another slot.
 	for _, session := range m.sessionsByPool[poolKey] {
-		if session.gameSession.State == mmpb.GameSession_ACTIVE && publicMatchHasUID(session, callerUID) {
+		if session.gameSession.State == mmpb.GameSession_ACTIVE &&
+			session.gameSession.GetCanParticipate() && publicMatchHasUID(session, callerUID) {
 			return session
 		}
 	}
@@ -377,6 +411,13 @@ func (m *matchmakerServer) completeMatchmakingTicket(ctx context.Context, reques
 		now := time.Now()
 		session = m.selectPublicMatchSessionLocked(stored, uid, now)
 		if session == nil {
+			if lastResourceSegment(stored.MatchmakingConfig) == "RaidPublic" {
+				pending := proto.Clone(stored).(*mmpb.MatchmakingTicket)
+				pending.State = mmpb.MatchmakingTicket_SEARCHING
+				pending.GameSession = nil
+				pending.MatchedUserSessions = nil
+				return pending, true
+			}
 			return nil, false
 		}
 		addPublicMatchMembers(session, stored, uid, now)
@@ -694,7 +735,7 @@ func (g *gameSessionServer) completeGameSessionCreationTicket(ctx context.Contex
 	session.Name = gsName
 	session.CurrentParticipantCount = participantCount
 	session.CanParticipate = true
-	session.IsPublic = session.GetPassword() == ""
+	session.IsPublic = session.GetPassword() == "" && lastResourceSegment(resp.GetMatchmakingConfig()) != "RaidPrivate"
 	session.State = mmpb.GameSession_ACTIVE
 	session.Host = envOr("NPLN_GAMESESSION_HOST", "127.0.0.1")
 	session.Port = int32(envInt("NPLN_GAMESESSION_PORT", 443))

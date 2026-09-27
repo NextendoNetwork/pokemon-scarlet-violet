@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
+	"strconv"
 	"sync"
 
 	"github.com/pion/turn/v4"
@@ -42,17 +44,33 @@ func startTURN(recorder *probeRecorder, listenAddress, relayAddress, username, p
 	}
 
 	key := turn.GenerateAuthKey(username, realm, password)
+	relayGenerator := turn.RelayAddressGenerator(&turn.RelayAddressGeneratorStatic{
+		RelayAddress: relayIP,
+		Address:      relayIP.String(),
+	})
+	if productionMode() {
+		minPort, minErr := strconv.Atoi(os.Getenv("NPLN_TURN_RELAY_MIN_PORT"))
+		maxPort, maxErr := strconv.Atoi(os.Getenv("NPLN_TURN_RELAY_MAX_PORT"))
+		if minErr != nil || maxErr != nil || minPort < 1024 || maxPort > 65535 || maxPort < minPort || maxPort-minPort > 999 {
+			_ = conn.Close()
+			return nil, fmt.Errorf("invalid production TURN relay port range")
+		}
+		relayGenerator = &turn.RelayAddressGeneratorPortRange{
+			RelayAddress: relayIP,
+			Address:      "0.0.0.0",
+			MinPort:      uint16(minPort),
+			MaxPort:      uint16(maxPort),
+			MaxRetries:   100,
+		}
+	}
 	server, err := turn.NewServer(turn.ServerConfig{
 		Realm: realm,
 		AuthHandler: func(candidate, candidateRealm string, _ net.Addr) ([]byte, bool) {
 			return key, candidate == username && candidateRealm == realm
 		},
 		PacketConnConfigs: []turn.PacketConnConfig{{
-			PacketConn: conn,
-			RelayAddressGenerator: &turn.RelayAddressGeneratorStatic{
-				RelayAddress: relayIP,
-				Address:      relayIP.String(),
-			},
+			PacketConn:            conn,
+			RelayAddressGenerator: relayGenerator,
 		}},
 		EventHandler: turn.EventHandler{
 			OnAllocationCreated: func(src, dst net.Addr, protocol, eventUser, eventRealm string, relay net.Addr, requestedPort int) {

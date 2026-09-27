@@ -1,3 +1,6 @@
 * text=auto eol=lf
 *.ps1 text eol=crlf
 *.patch text eol=lf
+
+# Unified-diff context lines intentionally begin with a space.
+*.patch whitespace=-blank-at-eol

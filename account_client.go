@@ -34,12 +34,34 @@ type nplnAccountData struct {
 	Friends    []nplnFriendData `json:"friends"`
 }
 
+func readInternalKey() (string, error) {
+	if path := os.Getenv("NEXTENDO_INTERNAL_KEY_FILE"); path != "" {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return "", err
+		}
+		key := strings.TrimSpace(string(data))
+		if key == "" {
+			return "", fmt.Errorf("internal key file is empty")
+		}
+		return key, nil
+	}
+	if productionMode() {
+		return "", fmt.Errorf("NEXTENDO_INTERNAL_KEY_FILE is required")
+	}
+	return os.Getenv("NEXTENDO_INTERNAL_KEY"), nil
+}
+
 func accountFriends(pid uint64) (*nplnAccountData, error) {
 	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/internal/npln-friends?pid=%d", accountBaseURL, pid), nil)
 	if err != nil {
 		return nil, err
 	}
-	if key := os.Getenv("NEXTENDO_INTERNAL_KEY"); key != "" {
+	key, err := readInternalKey()
+	if err != nil {
+		return nil, err
+	}
+	if key != "" {
 		req.Header.Set("X-Internal-Key", key)
 	}
 	resp, err := accountHTTP.Do(req)

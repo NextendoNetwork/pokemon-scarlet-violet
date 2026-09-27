@@ -46,11 +46,11 @@ func buildRestMux() http.Handler {
 	keyPath := envOr("NPLN_TRADE_VALIDATION_KEY", filepath.Join(filepath.Dir(envOr("KEY_FILE", "key.pem")), "trade-validation-rsa.pem"))
 	key, err := loadOrCreateTradeValidationKey(keyPath)
 	if err != nil {
-		log.Fatalf("[NPLN REST] initialize trade validation key: %v", err)
+		fatalf("[NPLN REST] initialize trade validation key: %v", err)
 	}
 	tradeValidation, err := newTradeValidationService(key)
 	if err != nil {
-		log.Fatalf("[NPLN REST] initialize trade validation service: %v", err)
+		fatalf("[NPLN REST] initialize trade validation service: %v", err)
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/public_key", func(w http.ResponseWriter, r *http.Request) {
@@ -73,7 +73,7 @@ func buildRestMux() http.Handler {
 func startLocalCombined(addr, certFile, keyFile string) {
 	tlsCert, err := tls.LoadX509KeyPair(certFile, keyFile)
 	if err != nil {
-		log.Fatalf("[NPLN LOCAL] load cert error: %v", err)
+		fatalf("[NPLN LOCAL] load cert error: %v", err)
 	}
 
 	tlsCfg := &tls.Config{
@@ -114,7 +114,7 @@ func startLocalCombined(addr, certFile, keyFile string) {
 
 	ln, err := tls.Listen("tcp", addr, tlsCfg)
 	if err != nil {
-		log.Fatalf("[NPLN LOCAL] listen on %s failed: %v", addr, err)
+		fatalf("[NPLN LOCAL] listen on %s failed: %v", addr, err)
 	}
 
 	grpcSrv := buildServer(nil) // Decrypted h2 served directly

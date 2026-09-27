@@ -8,10 +8,13 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"google.golang.org/grpc"
@@ -51,6 +54,16 @@ func envDuration(k string, d time.Duration) time.Duration {
 		}
 	}
 	return d
+}
+
+// Fatal startup errors remain visible when routine logs are disabled.
+func fatalf(format string, args ...any) {
+	_, _ = fmt.Fprintf(os.Stderr, "Violet NPLN fatal: "+format+"\n", args...)
+	os.Exit(1)
+}
+
+func fatal(err error) {
+	fatalf("%v", err)
 }
 
 func logMetadata(ctx context.Context, method string) {
@@ -132,8 +145,22 @@ func buildServer(creds credentials.TransportCredentials) *grpc.Server {
 	return s
 }
 
-func main() {
+func configureVioletLogging() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
+	// The protocol probe and per-request logs are for controlled local runs only.
+	// Keep production quiet unless debugging was explicitly enabled at startup.
+	if !violetDebugEnabled() {
+		log.SetOutput(io.Discard)
+	} else {
+		log.SetOutput(os.Stderr)
+	}
+}
+
+func main() {
+	configureVioletLogging()
+	if err := validateProductionConfig(); err != nil {
+		fatalf("production configuration: %v", err)
+	}
 	log.Printf("================================================================")
 	log.Printf(" Nextendo NPLN Server — Pokémon Violet [01008F6008C5E000]")
 	log.Printf(" Tenant ID: %s | Server ID: 50e39f8f", nplnTenantID)
@@ -147,36 +174,44 @@ func main() {
 	log.Printf("[NPLN PROBE] Structured evidence directory: %s", violetProbe.dir)
 	udpProbe, err := startUDPObservers(violetProbe, configuredUDPObserverAddresses())
 	if err != nil {
-		log.Fatalf("Failed to start passive UDP observers: %v", err)
+		fatalf("Failed to start passive UDP observers: %v", err)
 	}
 	defer udpProbe.Close()
 	stun, err := startSTUN(violetProbe, envOr("NPLN_STUN_LISTEN", "127.0.0.1:3478"))
 	if err != nil {
-		log.Fatalf("Failed to start advertised STUN endpoint: %v", err)
+		fatalf("Failed to start advertised STUN endpoint: %v", err)
 	}
 	defer stun.Close()
+	turnPassword := envOr("NPLN_TURN_PASSWORD", defaultTURNPassword)
+	if productionMode() {
+		passwordBytes, err := os.ReadFile(os.Getenv("NPLN_TURN_PASSWORD_FILE"))
+		if err != nil {
+			fatalf("Failed to read TURN password file: %v", err)
+		}
+		turnPassword = strings.TrimSpace(string(passwordBytes))
+	}
 	turnRelay, err := startTURN(
 		violetProbe,
 		envOr("NPLN_TURN_LISTEN", defaultTURNListen),
 		envOr("NPLN_TURN_RELAY_IP", defaultTURNHost),
 		envOr("NPLN_TURN_USERNAME", defaultTURNUsername),
-		envOr("NPLN_TURN_PASSWORD", defaultTURNPassword),
+		turnPassword,
 		envOr("NPLN_TURN_REALM", defaultTURNRealm),
 	)
 	if err != nil {
-		log.Fatalf("Failed to start advertised TURN endpoint: %v", err)
+		fatalf("Failed to start advertised TURN endpoint: %v", err)
 	}
 	defer turnRelay.Close()
 
 	nncsConfig, nncsEnabled, err := configuredNNCS()
 	if err != nil {
-		log.Fatalf("Invalid NNCS configuration: %v", err)
+		fatalf("Invalid NNCS configuration: %v", err)
 	}
 	var nncs *nncsServer
 	if nncsEnabled {
 		nncs, err = startNNCSServer(violetProbe, nncsConfig)
 		if err != nil {
-			log.Fatalf("Failed to start NNCS: %v", err)
+			fatalf("Failed to start NNCS: %v", err)
 		}
 		defer nncs.Close()
 	} else {
@@ -187,7 +222,7 @@ func main() {
 	if os.Getenv("NPLN_STANDALONE_GRPC") != "" {
 		tlsCert, err := tls.LoadX509KeyPair(certFile, keyFile)
 		if err != nil {
-			log.Fatalf("Failed to load TLS certificates: %v", err)
+			fatalf("Failed to load TLS certificates: %v", err)
 		}
 		creds := credentials.NewTLS(&tls.Config{
 			Certificates: []tls.Certificate{tlsCert},
@@ -196,10 +231,10 @@ func main() {
 		})
 		lis, err := net.Listen("tcp", addr)
 		if err != nil {
-			log.Fatalf("Failed to listen on %s: %v", addr, err)
+			fatalf("Failed to listen on %s: %v", addr, err)
 		}
 		log.Printf("Standalone gRPC Server listening on %s (TLS)", addr)
-		log.Fatal(buildServer(creds).Serve(lis))
+		fatal(buildServer(creds).Serve(lis))
 	}
 
 	// Default combined mode: ALPN Demuxer on port 443

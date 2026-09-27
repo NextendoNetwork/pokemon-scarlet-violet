@@ -38,7 +38,7 @@ func ensureTlsCertificate(certPath, keyPath string) {
 	// only for isolated TLS diagnostics.
 	profile := strings.ToLower(envOr("NPLN_CERT_PROFILE", "observed"))
 	if profile != "minimal" && profile != "observed" && profile != "compat" && profile != "external" {
-		log.Fatalf("[NPLN TLS] unsupported NPLN_CERT_PROFILE %q; use minimal, observed, compat, or external", profile)
+		fatalf("[NPLN TLS] unsupported NPLN_CERT_PROFILE %q; use minimal, observed, compat, or external", profile)
 	}
 
 	if !envEnabled("NPLN_REGENERATE_CERT") {
@@ -56,21 +56,24 @@ func ensureTlsCertificate(certPath, keyPath string) {
 			log.Printf("[NPLN TLS] Existing certificate pair is unusable: %v", err)
 		}
 	}
+	if productionMode() {
+		fatalf("TLS certificate pair is absent or invalid; production cannot generate a replacement")
+	}
 
 	caCert, caKey, caCertPath, err := loadNextendoCA()
 	if err != nil {
-		log.Fatalf("[NPLN TLS] failed to load signing CA: %v", err)
+		fatalf("[NPLN TLS] failed to load signing CA: %v", err)
 	}
 
 	leafPriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		log.Fatalf("[NPLN TLS] failed to generate leaf private key: %v", err)
+		fatalf("[NPLN TLS] failed to generate leaf private key: %v", err)
 	}
 
 	serialNumberLimit := new(big.Int).Lsh(big.NewInt(1), 128)
 	serialNumber, err := rand.Int(rand.Reader, serialNumberLimit)
 	if err != nil {
-		log.Fatalf("[NPLN TLS] failed to generate serial number: %v", err)
+		fatalf("[NPLN TLS] failed to generate serial number: %v", err)
 	}
 
 	now := time.Now().UTC()
@@ -79,13 +82,13 @@ func ensureTlsCertificate(certPath, keyPath string) {
 		notAfter = caCert.NotAfter.Add(-time.Hour)
 	}
 	if !notAfter.After(now.Add(24 * time.Hour)) {
-		log.Fatalf("[NPLN TLS] signing CA expires too soon: %s", caCert.NotAfter.UTC().Format(time.RFC3339))
+		fatalf("[NPLN TLS] signing CA expires too soon: %s", caCert.NotAfter.UTC().Format(time.RFC3339))
 	}
 
 	dnsNames, ipAddresses := certificateProfileSANs(profile)
 	publicKeyDER, err := x509.MarshalPKIXPublicKey(&leafPriv.PublicKey)
 	if err != nil {
-		log.Fatalf("[NPLN TLS] failed to encode leaf public key: %v", err)
+		fatalf("[NPLN TLS] failed to encode leaf public key: %v", err)
 	}
 	publicKeyID := sha256.Sum256(publicKeyDER)
 
@@ -108,19 +111,19 @@ func ensureTlsCertificate(certPath, keyPath string) {
 
 	leafDER, err := x509.CreateCertificate(rand.Reader, &leafTemplate, caCert, &leafPriv.PublicKey, caKey)
 	if err != nil {
-		log.Fatalf("[NPLN TLS] failed to sign Violet leaf certificate: %v", err)
+		fatalf("[NPLN TLS] failed to sign Violet leaf certificate: %v", err)
 	}
 
 	if err := writeCertificatePair(certPath, keyPath, leafDER, caCert.Raw, leafPriv); err != nil {
-		log.Fatalf("[NPLN TLS] failed to write Violet certificate pair: %v", err)
+		fatalf("[NPLN TLS] failed to write Violet certificate pair: %v", err)
 	}
 
 	generated, err := tls.LoadX509KeyPair(certPath, keyPath)
 	if err != nil {
-		log.Fatalf("[NPLN TLS] generated certificate pair cannot be loaded: %v", err)
+		fatalf("[NPLN TLS] generated certificate pair cannot be loaded: %v", err)
 	}
 	if err := certificateMatchesProfile(generated, profile); err != nil {
-		log.Fatalf("[NPLN TLS] generated certificate failed post-write validation: %v", err)
+		fatalf("[NPLN TLS] generated certificate failed post-write validation: %v", err)
 	}
 
 	fields := tlsCertificateFields(generated)
@@ -281,8 +284,27 @@ func certificateMatchesProfile(pair tls.Certificate, profile string) error {
 		return fmt.Errorf("leaf certificate is not valid for the next 24 hours")
 	}
 	if profile == "external" {
+		if leaf.IsCA {
+			return fmt.Errorf("external leaf certificate is marked as a CA")
+		}
 		if err := leaf.VerifyHostname(violetTLSHostname); err != nil {
 			return fmt.Errorf("external certificate does not match %s: %w", violetTLSHostname, err)
+		}
+		if err := leaf.VerifyHostname(violetGamesyncHost); err != nil {
+			return fmt.Errorf("external certificate does not match %s: %w", violetGamesyncHost, err)
+		}
+		if productionMode() {
+			caPEM, err := os.ReadFile(os.Getenv("NPLN_CA_CERT_FILE"))
+			if err != nil {
+				return fmt.Errorf("read expected TLS issuer: %w", err)
+			}
+			roots := x509.NewCertPool()
+			if !roots.AppendCertsFromPEM(caPEM) {
+				return fmt.Errorf("expected TLS issuer file contains no CA")
+			}
+			if _, err := leaf.Verify(x509.VerifyOptions{Roots: roots, DNSName: violetTLSHostname}); err != nil {
+				return fmt.Errorf("external certificate is not signed by expected issuer: %w", err)
+			}
 		}
 		return nil
 	}

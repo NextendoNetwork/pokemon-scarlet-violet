@@ -1,28 +1,19 @@
-# Pok√©mon Violet
+# PokÈmon Violet
 
-Experimental Nextendo NPLN server for Pok√©mon Violet 3.0.1.
+Dedicated Nextendo NPLN server for PokÈmon Violet (`01008F6008C5E000`, tenant `t-50e39f8f-lp1`). The client supports Violet 4.0.0; native regulation records are supplied privately from the supported game build.
 
-This is a work in progress. The backend has been tested with Ryujinx-Nextendo
-profiles on one Windows PC. Validated local flows include Union Circle, Link
-Trade, Surprise Trade, Rental Teams and Ranked Singles. Ranked Singles completes
-matchmaking, peer-to-peer setup, a full battle, consensus result reporting and
-persistent rank updates. Link Battle and Casual Singles have reached a real
-battle.
+## Current status ó 2026-09-27
 
-The current build also hosts a public Tera Raid room. A player completed the
-raid solo and caught its Pok√©mon. The Pok√© Portal raid board makes successful
-distributed and ordinary session queries. Mystery Gift loads a nine-card BCAT
-catalog; all five locally generated rare-item cards were listed and redeemed.
-Official Competition registration displays an initial rating of 1500.
+Two-player internet testing confirmed Union Circle, Link Trade, Surprise Trade and Link Battle. Ranked results persisted after a completed battle; the Singles and Doubles counters are separate. Rental Team publication was confirmed in game.
 
-Multiplayer raid discovery and joining, Ranked Doubles and Casual Doubles
-matches, completed Official battles, wider concurrency and internet deployment
-still require testing. See [Tera Raid status](docs/tera-raids.md) and
-[Mystery Gift BCAT](docs/mystery-gift-bcat.md).
+Tera Raid hosting, board discovery, code/private matching and random-search handling have received server corrections. A complete multiplayer raid on the current build still needs confirmation. Online Competition entry/resources are implemented; full competition battle coverage and wider concurrency remain unverified.
+
+Battle Stadium entry was reproduced with a second player's original save and fixed in the emulator: the terms page must return `/callback/agree`, not just `/callback`. The fix is included as a client source patch; swapping or editing a player's save is unnecessary.
+
 
 ## Build
 
-Use Go 1.26.4 or a compatible newer release:
+Build with Go 1.26.6:
 
 ```sh
 go build -o violet-server .
@@ -37,14 +28,11 @@ are included.
 
 ## Tests
 
-Go test sources are kept in `Test Files`. Run them in an isolated temporary
-copy of the backend:
+Tests are kept in `Test Files`. The runners create an isolated temporary copy of the backend and run the tests and `go vet` there:
 
 ```powershell
-powershell -NoProfile -File ".\Test Files\run-tests.ps1"
+powershell -NoProfile -File "Test Files/run-tests.ps1"
 ```
-
-or on a Unix-like system:
 
 ```sh
 sh "Test Files/run-tests.sh"
