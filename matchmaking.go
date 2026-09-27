@@ -416,10 +416,14 @@ func (m *matchmakerServer) TrackMatchmakingTicket(req *mmpb.TrackMatchmakingTick
 	}()
 
 	resp, ok := m.completeMatchmakingTicket(ctx, req.GetName(), req.GetIncludeIdTokenUsers())
-	for ok && resp.State == mmpb.MatchmakingTicket_SEARCHING {
+	searchingSent := false
+	if ok && resp.State == mmpb.MatchmakingTicket_SEARCHING {
 		if err := stream.Send(resp); err != nil {
 			return err
 		}
+		searchingSent = true
+	}
+	for ok && resp.State == mmpb.MatchmakingTicket_SEARCHING {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -428,6 +432,15 @@ func (m *matchmakerServer) TrackMatchmakingTicket(req *mmpb.TrackMatchmakingTick
 		resp, ok = m.completeMatchmakingTicket(ctx, req.GetName(), req.GetIncludeIdTokenUsers())
 	}
 	if !ok {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		m.mu.Lock()
+		cancelled := m.tickets[lastResourceSegment(req.GetName())] == nil
+		m.mu.Unlock()
+		if cancelled {
+			return nil
+		}
 		log.Printf("[NPLN MM] TrackMatchmakingTicket unknown ticket=%q", req.GetName())
 		return stream.Send(&mmpb.MatchmakingTicket{
 			Name:  req.GetName(),
@@ -436,10 +449,11 @@ func (m *matchmakerServer) TrackMatchmakingTicket(req *mmpb.TrackMatchmakingTick
 	}
 
 	phaseDelay := envDuration("NPLN_MATCH_PHASE_DELAY", 350*time.Millisecond)
-	for _, state := range []mmpb.MatchmakingTicket_State{
-		mmpb.MatchmakingTicket_SEARCHING,
-		mmpb.MatchmakingTicket_PLACING,
-	} {
+	phases := []mmpb.MatchmakingTicket_State{mmpb.MatchmakingTicket_SEARCHING, mmpb.MatchmakingTicket_PLACING}
+	if searchingSent {
+		phases = phases[1:]
+	}
+	for _, state := range phases {
 		phase := proto.Clone(resp).(*mmpb.MatchmakingTicket)
 		phase.State = state
 		phase.MatchedUserSessions = nil
@@ -447,7 +461,11 @@ func (m *matchmakerServer) TrackMatchmakingTicket(req *mmpb.TrackMatchmakingTick
 		if err := stream.Send(phase); err != nil {
 			return err
 		}
-		time.Sleep(phaseDelay)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(phaseDelay):
+		}
 	}
 	log.Printf("[NPLN MM] TrackMatchmakingTicket succeeded ticket=%q session=%q users=%d host=%s:%d",
 		resp.Name, resp.GameSession.Name, len(resp.MatchedUserSessions), resp.GameSession.Host, resp.GameSession.Port)
@@ -459,13 +477,21 @@ func (m *matchmakerServer) CancelMatchmakingTicket(ctx context.Context, req *mmp
 	if err != nil {
 		return nil, err
 	}
+	id := lastResourceSegment(req.GetName())
 	m.mu.Lock()
-	if !ticketOwnedBy(m.tickets[lastResourceSegment(req.GetName())].GetUserDefinitions(), uid) {
+	ticket := m.tickets[id]
+	if ticket == nil {
+		m.mu.Unlock()
+		// The tracking stream may have already removed a waiting pair.
+		// A subsequent explicit cancel still completes successfully.
+		return &emptypb.Empty{}, nil
+	}
+	if !ticketOwnedBy(ticket.GetUserDefinitions(), uid) {
 		m.mu.Unlock()
 		return nil, status.Error(codes.PermissionDenied, "ticket does not belong to caller")
 	}
-	m.cancelPendingPairLocked(lastResourceSegment(req.GetName()))
-	delete(m.tickets, lastResourceSegment(req.GetName()))
+	m.cancelPendingPairLocked(id)
+	delete(m.tickets, id)
 	m.mu.Unlock()
 
 	log.Printf("[NPLN MM] CancelMatchmakingTicket name=%q", req.GetName())
