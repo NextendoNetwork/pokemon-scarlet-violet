@@ -1,8 +1,8 @@
-# Pokémon Violet
+# pokemon-sv-npln
 
-Dedicated Nextendo NPLN server for Pokémon Violet (`01008F6008C5E000`, tenant `t-50e39f8f-lp1`). The client supports Violet 4.0.0; native regulation records are supplied privately from the supported game build.
+Nextendo NPLN server for PokÃ©mon Scarlet (`0100A3D008C5C000`) and Violet (`01008F6008C5E000`), sharing tenant `t-50e39f8f-lp1`. The client supports version 4.0.0 of both games; native regulation records are supplied privately from the supported game build.
 
-## Current status — 2026-09-27
+## Current status â€” 2026-09-27
 
 Two-player internet testing confirmed Union Circle, Link Trade, Surprise Trade and Link Battle. Ranked results persisted after a completed battle; the Singles and Doubles counters are separate. Rental Team publication was confirmed in game.
 
@@ -16,7 +16,7 @@ Battle Stadium entry was reproduced with a second player's original save and fix
 Build with Go 1.26.6:
 
 ```sh
-go build -o violet-server .
+go build -o pokemon-sv-npln .
 ```
 
 Copy `example.env` into your environment and replace every placeholder. The

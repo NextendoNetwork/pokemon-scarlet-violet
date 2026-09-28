@@ -138,7 +138,7 @@ func startLocalCombined(addr, certFile, keyFile string) {
 		}
 	}()
 
-	log.Printf("[NPLN LOCAL] Nextendo NPLN server listening on %s (TLS ALPN h2+http/1.1) for Violet", addr)
+	log.Printf("[NPLN LOCAL] pokemon-sv-npln listening on %s (TLS ALPN h2+http/1.1) for Scarlet/Violet", addr)
 	for {
 		c, err := ln.Accept()
 		if err != nil {

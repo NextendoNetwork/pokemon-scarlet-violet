@@ -861,7 +861,7 @@ func (g *gameSessionServer) TrackGameSessionCreationTicket(req *mmpb.TrackGameSe
 func (g *gameSessionServer) AllocateIceServerSet(ctx context.Context, req *mmpb.AllocateIceServerSetRequest) (*mmpb.IceServerSet, error) {
 	requestedTenant := req.GetTenant()
 	if requestedTenant != "" && requestedTenant != "tenants/current" && requestedTenant != nplnTenant {
-		return nil, status.Error(codes.InvalidArgument, "tenant does not match Violet")
+		return nil, status.Error(codes.InvalidArgument, "tenant does not match Scarlet/Violet")
 	}
 	// Violet sends the aliases "tenants/current" (or an empty value), but NPLN
 	// resources returned by the service are canonical tenant resources. Do not

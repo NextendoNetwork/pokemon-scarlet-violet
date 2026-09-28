@@ -1,6 +1,6 @@
 package main
 
-// Nextendo NPLN Server — Pokémon Scarlet/Violet (Tenant: t-50e39f8f-lp1)
+// pokemon-sv-npln — Nextendo NPLN server for Pokémon Scarlet and Violet.
 //
 // Experimental clean-room backend and protocol probe. Registered service
 // surfaces are partial until Violet traffic demonstrates the required behavior.
@@ -58,7 +58,7 @@ func envDuration(k string, d time.Duration) time.Duration {
 
 // Fatal startup errors remain visible when routine logs are disabled.
 func fatalf(format string, args ...any) {
-	_, _ = fmt.Fprintf(os.Stderr, "Violet NPLN fatal: "+format+"\n", args...)
+	_, _ = fmt.Fprintf(os.Stderr, "pokemon-sv-npln fatal: "+format+"\n", args...)
 	os.Exit(1)
 }
 
@@ -162,7 +162,7 @@ func main() {
 		fatalf("production configuration: %v", err)
 	}
 	log.Printf("================================================================")
-	log.Printf(" Nextendo NPLN Server — Pokémon Scarlet/Violet [0100A3D008C5C000 / 01008F6008C5E000]")
+	log.Printf(" pokemon-sv-npln — Pokémon Scarlet/Violet [0100A3D008C5C000 / 01008F6008C5E000]")
 	log.Printf(" Tenant ID: %s | Server ID: 50e39f8f", nplnTenantID)
 	log.Printf("================================================================")
 

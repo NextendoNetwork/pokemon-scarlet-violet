@@ -179,7 +179,7 @@ func gatedIdentity(ext *authpb.ExternalIdToken, tenant string) (uint64, string, 
 
 func productionIdentity(ext *authpb.ExternalIdToken, tenant string) (uint64, string, error) {
 	if tenant != "" && tenant != "tenants/current" && tenant != nplnTenant {
-		return 0, "", status.Error(codes.PermissionDenied, "tenant does not match Violet")
+		return 0, "", status.Error(codes.PermissionDenied, "tenant does not match Scarlet/Violet")
 	}
 	pid, ok := pidFromNnex(ext)
 	if !ok || pid == 0 {
