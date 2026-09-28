@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -274,7 +275,7 @@ func (m *matchmakerServer) selectPublicMatchSessionLocked(ticket *mmpb.Matchmaki
 					hasOwner = true
 				}
 			}
-			if !hasOwner {
+			if !hasOwner || !raidMatchesSelection(ticket, gs) {
 				continue
 			}
 			session := m.registry.pooled[id]
@@ -311,7 +312,38 @@ func (m *matchmakerServer) selectPublicMatchSessionLocked(ticket *mmpb.Matchmaki
 	return m.newPublicMatchSessionLocked(ticket, poolKey, now)
 }
 
-func addPublicMatchMembers(session *publicMatchSession, ticket *mmpb.MatchmakingTicket, callerUID string, now time.Time) {
+// Selecting a portal posting uses RaidPublic too, but sends exact properties
+// and numeric ranges. Random sends only progress, which is an unlock ceiling.
+func raidMatchesSelection(ticket *mmpb.MatchmakingTicket, gs *mmpb.GameSession) bool {
+	if len(ticket.GetUserDefinitions()) == 0 {
+		return false
+	}
+	attrs := ticket.UserDefinitions[0].GetAttributes().GetFields()
+	properties := gs.GetProperties().GetFields()
+	for _, key := range []string{"difficulty", "fieldId", "form_no", "gem_type", "is_distributed", "is_kiwami", "mons_no", "raid_table_id", "rom_version", "sex"} {
+		if want := attrs[key]; want != nil && !proto.Equal(want, properties[key]) {
+			return false
+		}
+		for _, bound := range []string{"_min", "_max"} {
+			if want := attrs[key+bound]; want != nil {
+				limit, validLimit := want.GetValueType().(*commonpb.Value_IntegerValue)
+				actual, validActual := properties[key].GetValueType().(*commonpb.Value_IntegerValue)
+				if !validLimit || !validActual || (bound == "_min" && actual.IntegerValue < limit.IntegerValue) || (bound == "_max" && actual.IntegerValue > limit.IntegerValue) {
+					return false
+				}
+			}
+		}
+	}
+	if progress := attrs["progress"]; progress != nil {
+		ceiling, valid := progress.GetValueType().(*commonpb.Value_IntegerValue)
+		if difficulty, ok := properties["difficulty"].GetValueType().(*commonpb.Value_IntegerValue); !valid || (ok && difficulty.IntegerValue > ceiling.IntegerValue) {
+			return false
+		}
+	}
+	return true
+}
+
+func addPublicMatchMembers(session *publicMatchSession, ticket *mmpb.MatchmakingTicket, callerUID, appID string, now time.Time) {
 	if publicMatchHasUID(session, callerUID) {
 		return
 	}
@@ -334,7 +366,7 @@ func addPublicMatchMembers(session *publicMatchSession, ticket *mmpb.Matchmaking
 			return
 		}
 		usName := session.gameSession.GetName() + "/userSessions/" + id
-		matchToken := mintGssMatchToken(
+		matchToken := mintGssMatchTokenForApp(
 			uid,
 			nplnTenant,
 			session.gameSession.GetName(),
@@ -342,6 +374,7 @@ func addPublicMatchMembers(session *publicMatchSession, ticket *mmpb.Matchmaking
 			definition.GetTeam(),
 			gamesyncAttrJSON(definition.GetAttributes()),
 			gamesyncLatencyJSON(definition.GetLatencyData()),
+			appID,
 		)
 		session.members = append(session.members, &publicMatchMember{
 			definition:  definition,
@@ -420,7 +453,7 @@ func (m *matchmakerServer) completeMatchmakingTicket(ctx context.Context, reques
 			}
 			return nil, false
 		}
-		addPublicMatchMembers(session, stored, uid, now)
+		addPublicMatchMembers(session, stored, uid, callerAppID(ctx), now)
 		m.ticketSessions[ticketID] = session
 	}
 	if violetPairConfig(stored.MatchmakingConfig) && session.gameSession.CurrentParticipantCount < 2 {
@@ -450,10 +483,17 @@ func (m *matchmakerServer) TrackMatchmakingTicket(req *mmpb.TrackMatchmakingTick
 		return status.Error(codes.PermissionDenied, "ticket does not belong to caller")
 	}
 	log.Printf("[NPLN MM] TrackMatchmakingTicket name=%q", req.GetName())
+	ticketID := lastResourceSegment(req.GetName())
 	defer func() {
 		m.mu.Lock()
 		defer m.mu.Unlock()
-		m.cancelPendingPairLocked(lastResourceSegment(req.GetName()))
+		m.cancelPendingPairLocked(ticketID)
+		// A random raid search can finish without a host when the client
+		// cancels the stream. Do not retain that unmatched ticket.
+		if pending := m.tickets[ticketID]; pending != nil &&
+			lastResourceSegment(pending.MatchmakingConfig) == "RaidPublic" && m.ticketSessions[ticketID] == nil {
+			delete(m.tickets, ticketID)
+		}
 	}()
 
 	resp, ok := m.completeMatchmakingTicket(ctx, req.GetName(), req.GetIncludeIdTokenUsers())
@@ -644,7 +684,7 @@ func (g *gameSessionServer) completeGameSessionCreationTicket(ctx context.Contex
 			return nil, false
 		}
 		resp.GameSession = proto.Clone(g.sessions[lastResourceSegment(stored.GetGameSession().GetName())]).(*mmpb.GameSession)
-		resp.MatchedUserSessions = matchedForCaller(resp.GameSession, callerUID, includeUsers)
+		resp.MatchedUserSessions = matchedForCaller(resp.GameSession, callerUID, includeUsers, callerAppID(ctx))
 		return resp, true
 	}
 	if len(resp.UserDefinitions) == 0 {
@@ -679,7 +719,7 @@ func (g *gameSessionServer) completeGameSessionCreationTicket(ctx context.Contex
 		usName := gsName + "/userSessions/" + userSessionID
 		matchToken := ""
 		if includeMatchmakingIDToken(includeUsers, definition.GetUser(), callerUID) {
-			matchToken = mintGssMatchToken(
+			matchToken = mintGssMatchTokenForApp(
 				uid,
 				nplnTenant,
 				gsName,
@@ -687,6 +727,7 @@ func (g *gameSessionServer) completeGameSessionCreationTicket(ctx context.Contex
 				definition.GetTeam(),
 				gamesyncAttrJSON(definition.GetAttributes()),
 				gamesyncLatencyJSON(definition.GetLatencyData()),
+				callerAppID(ctx),
 			)
 		}
 		matched = append(matched, &mmpb.MatchedUserSession{
@@ -802,6 +843,13 @@ func (g *gameSessionServer) AllocateIceServerSet(ctx context.Context, req *mmpb.
 	turnPort := envInt("NPLN_TURN_PORT", 3479)
 	turnUsername := envOr("NPLN_TURN_USERNAME", defaultTURNUsername)
 	turnPassword := envOr("NPLN_TURN_PASSWORD", defaultTURNPassword)
+	if productionMode() {
+		passwordBytes, err := os.ReadFile(os.Getenv("NPLN_TURN_PASSWORD_FILE"))
+		if err != nil || strings.TrimSpace(string(passwordBytes)) == "" {
+			return nil, status.Error(codes.Unavailable, "TURN credentials unavailable")
+		}
+		turnPassword = strings.TrimSpace(string(passwordBytes))
+	}
 	stunHost := envOr("NPLN_STUN_HOST", "127.0.0.1")
 	stunPort := envInt("NPLN_STUN_PORT", 3478)
 	ttl := envDuration("NPLN_ICE_TTL", 24*time.Hour)

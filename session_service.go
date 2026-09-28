@@ -12,6 +12,7 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
+	commonpb "npln.nintendo.net/npln-practice/proto/common"
 	mmpb "npln.nintendo.net/npln-practice/proto/matchmaking/v1"
 )
 
@@ -28,7 +29,7 @@ func validateCallerDefinitions(defs []*mmpb.UserDefinition, uid string) error {
 func ticketOwnedBy(defs []*mmpb.UserDefinition, uid string) bool {
 	return len(defs) == 1 && lastResourceSegment(defs[0].GetUser()) == uid
 }
-func matchedForCaller(gs *mmpb.GameSession, uid string, include []string) []*mmpb.MatchedUserSession {
+func matchedForCaller(gs *mmpb.GameSession, uid string, include []string, appID string) []*mmpb.MatchedUserSession {
 	out := make([]*mmpb.MatchedUserSession, 0, len(gs.GetUserSessions()))
 	for _, u := range gs.GetUserSessions() {
 		// MatchedUserSessions describes the caller's local participants. The full
@@ -39,7 +40,7 @@ func matchedForCaller(gs *mmpb.GameSession, uid string, include []string) []*mmp
 		d := &mmpb.UserDefinition{User: u.User, Team: u.Team, Attributes: u.Attributes, LatencyData: u.LatencyData}
 		token := ""
 		if userIDFromPath(u.User) == uid && includeMatchmakingIDToken(include, u.User, uid) {
-			token = mintGssMatchToken(uid, nplnTenant, gs.Name, u.Name, u.Team, gamesyncAttrJSON(u.Attributes), gamesyncLatencyJSON(u.LatencyData))
+			token = mintGssMatchTokenForApp(uid, nplnTenant, gs.Name, u.Name, u.Team, gamesyncAttrJSON(u.Attributes), gamesyncLatencyJSON(u.LatencyData), appID)
 		}
 		out = append(out, &mmpb.MatchedUserSession{UserDefinition: proto.Clone(d).(*mmpb.UserDefinition), UserSession: u.Name, MatchmakingIdToken: token})
 	}
@@ -162,6 +163,17 @@ func (g *gameSessionServer) QueryGameSessions(ctx context.Context, req *mmpb.Que
 		}
 		matched := true
 		for k, v := range req.Properties.GetFields() {
+			// The portal sends the player's unlocked difficulty ceiling in
+			// both distributed and regular raid board queries.
+			if lastResourceSegment(req.GameSessionSearchConfig) == "RaidPublicSearch" && k == "difficulty" {
+				want, wantOK := v.GetValueType().(*commonpb.Value_IntegerValue)
+				actual, actualOK := gs.Properties.GetFields()[k].GetValueType().(*commonpb.Value_IntegerValue)
+				if !wantOK || !actualOK || actual.IntegerValue > want.IntegerValue {
+					matched = false
+					break
+				}
+				continue
+			}
 			if !proto.Equal(v, gs.Properties.GetFields()[k]) {
 				matched = false
 				break
@@ -221,13 +233,13 @@ func (g *gameSessionServer) JoinGameSession(ctx context.Context, req *mmpb.JoinG
 		d := proto.Clone(req.UserDefinitions[0]).(*mmpb.UserDefinition)
 		d.User = nplnTenant + "/users/" + uid
 		if pooled := g.registry.pooled[lastResourceSegment(gs.Name)]; pooled != nil {
-			addPublicMatchMembers(pooled, &mmpb.MatchmakingTicket{UserDefinitions: []*mmpb.UserDefinition{d}}, uid, time.Now())
+			addPublicMatchMembers(pooled, &mmpb.MatchmakingTicket{UserDefinitions: []*mmpb.UserDefinition{d}}, uid, callerAppID(ctx), time.Now())
 		} else {
 			gs.UserSessions = append(gs.UserSessions, &mmpb.UserSession{Name: gs.Name + fmt.Sprintf("/userSessions/us-%d", time.Now().UnixNano()), User: d.User, Team: d.Team, Attributes: d.Attributes, LatencyData: d.LatencyData, State: mmpb.UserSession_ACTIVE, CreateTime: timestamppb.Now()})
 			gs.CurrentParticipantCount = int32(len(gs.UserSessions))
 		}
 	}
-	return &mmpb.JoinGameSessionResponse{GameSession: safeSessionView(gs, mmpb.GameSessionView_FULL), MatchedUserSessions: matchedForCaller(gs, uid, req.IncludeIdTokenUsers)}, nil
+	return &mmpb.JoinGameSessionResponse{GameSession: safeSessionView(gs, mmpb.GameSessionView_FULL), MatchedUserSessions: matchedForCaller(gs, uid, req.IncludeIdTokenUsers, callerAppID(ctx))}, nil
 }
 
 func (g *gameSessionServer) IssueMatchmakingIdToken(ctx context.Context, req *mmpb.IssueMatchmakingIdTokenRequest) (*mmpb.IssueMatchmakingIdTokenResponse, error) {
@@ -249,7 +261,7 @@ func (g *gameSessionServer) IssueMatchmakingIdToken(ctx context.Context, req *mm
 	if !sessionHasUID(gs, uid) {
 		return nil, status.Error(codes.PermissionDenied, "active membership required")
 	}
-	return &mmpb.IssueMatchmakingIdTokenResponse{GameSession: safeSessionView(gs, mmpb.GameSessionView_FULL), MatchedUserSessions: matchedForCaller(gs, uid, req.IncludeIdTokenUsers)}, nil
+	return &mmpb.IssueMatchmakingIdTokenResponse{GameSession: safeSessionView(gs, mmpb.GameSessionView_FULL), MatchedUserSessions: matchedForCaller(gs, uid, req.IncludeIdTokenUsers, callerAppID(ctx))}, nil
 }
 
 func (g *gameSessionServer) ListUserSessions(ctx context.Context, req *mmpb.ListUserSessionsRequest) (*mmpb.ListUserSessionsResponse, error) {

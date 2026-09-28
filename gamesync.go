@@ -285,6 +285,7 @@ type gssMatchClaims struct {
 	Issuer  string `json:"iss"`
 	Subject string `json:"sub"`
 	Game    struct {
+		AppID         string `json:"app_id"`
 		GameSessionID string `json:"gsid"`
 		UserSessionID string `json:"usid"`
 		TenantID      string `json:"tid"`
@@ -301,6 +302,7 @@ type gamesyncAccessClaims struct {
 	Subject   string `json:"sub"`
 	NPLN      struct {
 		TenantID string `json:"tid"`
+		AppID    string `json:"app_id"`
 	} `json:"npln"`
 	GSS struct {
 		GameSession string `json:"game_session"`
@@ -455,7 +457,7 @@ func (g *gamesyncServer) IssueToken(ctx context.Context, req *gspb.IssueTokenReq
 			return nil, status.Error(codes.InvalidArgument, "malformed signed attributes")
 		}
 	}
-	accessToken := mintSessionToken(claims.Subject, nplnTenant, gameSession, requestedUserSession)
+	accessToken := mintSessionTokenForApp(claims.Subject, nplnTenant, gameSession, requestedUserSession, claims.Game.AppID)
 	g.rememberSession(gamesyncSession{
 		UID:         claims.Subject,
 		GameSession: gameSession,

@@ -81,6 +81,37 @@ func nsaFromExternal(ext *authpb.ExternalIdToken) (string, bool) {
 	return "", false
 }
 
+// The BAAS token may carry the title that requested NPLN. Its identity is
+// authenticated separately by the Nextendo nnex proof; the title only selects
+// the app_id claim and never widens tenant or account permissions.
+func appIDFromExternal(ext *authpb.ExternalIdToken) string {
+	if ext == nil {
+		return nplnAppID
+	}
+	parts := strings.Split(ext.GetNsaIdToken(), ".")
+	if len(parts) < 2 {
+		return nplnAppID
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return nplnAppID
+	}
+	var claims struct {
+		AppID   string `json:"app_id"`
+		TitleID string `json:"title_id"`
+	}
+	if json.Unmarshal(payload, &claims) != nil {
+		return nplnAppID
+	}
+	for _, id := range []string{claims.AppID, claims.TitleID} {
+		id = strings.ToUpper(id)
+		if supportedNplnAppID(id) {
+			return id
+		}
+	}
+	return nplnAppID
+}
+
 func tenantOr(t string) string {
 	if t == "" {
 		return nplnTenant
@@ -189,15 +220,22 @@ func pidPourUid(uid string) uint64 {
 }
 
 func newTokenPID(pid uint64, userPath string) *authpb.Token {
+	return newTokenPIDForApp(pid, userPath, nplnAppID)
+}
+
+func newTokenPIDForApp(pid uint64, userPath, appID string) *authpb.Token {
+	if !supportedNplnAppID(appID) {
+		appID = nplnAppID
+	}
 	retenirIdentite(userPath, pid)
 	refresh := jetonRafraichissement(pid)
 	if productionMode() {
-		refresh = productionRefreshToken(pid, userPath)
+		refresh = productionRefreshTokenForApp(pid, userPath, appID)
 	}
 
 	return &authpb.Token{
 		User:         userPath,
-		AccessToken:  mintNplnAccessToken(pid, userPath, nplnTenant),
+		AccessToken:  mintNplnAccessTokenForApp(pid, userPath, nplnTenant, appID),
 		RefreshToken: refresh,
 		Ttl:          durationpb.New(nplnTokenTTL),
 	}
@@ -206,6 +244,19 @@ func newTokenPID(pid uint64, userPath string) *authpb.Token {
 const productionRefreshTTL = 24 * time.Hour
 
 func productionRefreshToken(pid uint64, userPath string) string {
+	return productionRefreshTokenForApp(pid, userPath, nplnAppID)
+}
+
+func productionRefreshTokenForApp(pid uint64, userPath, appID string) string {
+	if !supportedNplnAppID(appID) {
+		appID = nplnAppID
+	}
+	if appID == nplnScarletAppID {
+		body := fmt.Sprintf("scarlet-refresh-v1.%d.%d.%s", pid, time.Now().Add(productionRefreshTTL).Unix(), base64.RawURLEncoding.EncodeToString([]byte(userPath)))
+		mac := hmac.New(sha256.New, loadNextendoSecret())
+		mac.Write([]byte(body))
+		return body + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	}
 	body := fmt.Sprintf("violet-refresh-v2.%d.%d.%s", pid, time.Now().Add(productionRefreshTTL).Unix(), base64.RawURLEncoding.EncodeToString([]byte(userPath)))
 	mac := hmac.New(sha256.New, loadNextendoSecret())
 	mac.Write([]byte(body))
@@ -213,37 +264,46 @@ func productionRefreshToken(pid uint64, userPath string) string {
 }
 
 func parseProductionRefreshToken(token string) (uint64, string, bool) {
+	pid, user, _, ok := parseProductionRefreshTokenWithApp(token)
+	return pid, user, ok
+}
+
+func parseProductionRefreshTokenWithApp(token string) (uint64, string, string, bool) {
 	parts := strings.Split(token, ".")
-	if len(parts) != 5 || parts[0] != "violet-refresh-v2" {
-		return 0, "", false
+	appID := nplnAppID
+	if len(parts) != 5 || (parts[0] != "violet-refresh-v2" && parts[0] != "scarlet-refresh-v1") {
+		return 0, "", "", false
+	}
+	if parts[0] == "scarlet-refresh-v1" {
+		appID = nplnScarletAppID
 	}
 	pid, err := strconv.ParseUint(parts[1], 10, 64)
 	if err != nil || pid == 0 {
-		return 0, "", false
+		return 0, "", "", false
 	}
 	expiry, err := strconv.ParseInt(parts[2], 10, 64)
 	if err != nil || time.Now().Unix() >= expiry {
-		return 0, "", false
+		return 0, "", "", false
 	}
 	userBytes, err := base64.RawURLEncoding.DecodeString(parts[3])
 	if err != nil || len(userBytes) == 0 {
-		return 0, "", false
+		return 0, "", "", false
 	}
 	userPath := string(userBytes)
 	if !strings.HasPrefix(userPath, nplnTenant+"/users/") {
-		return 0, "", false
+		return 0, "", "", false
 	}
 	secret := loadNextendoSecret()
 	if len(secret) == 0 {
-		return 0, "", false
+		return 0, "", "", false
 	}
 	mac := hmac.New(sha256.New, secret)
 	mac.Write([]byte(strings.Join(parts[:4], ".")))
 	signature, err := base64.RawURLEncoding.DecodeString(parts[4])
 	if err != nil || !hmac.Equal(signature, mac.Sum(nil)) {
-		return 0, "", false
+		return 0, "", "", false
 	}
-	return pid, userPath, true
+	return pid, userPath, appID, true
 }
 
 func jetonRafraichissement(pid uint64) string {
@@ -288,12 +348,12 @@ func (s *authServer) IssueToken(ctx context.Context, req *authpb.IssueTokenReque
 		return nil, err
 	}
 	log.Printf("[NPLN Auth] IssueToken pid=%d user=%s", pid, userPath)
-	return &authpb.IssueTokenResponse{Token: newTokenPID(pid, userPath)}, nil
+	return &authpb.IssueTokenResponse{Token: newTokenPIDForApp(pid, userPath, appIDFromExternal(req.GetExternalIdToken()))}, nil
 }
 
 func (s *authServer) RefreshToken(ctx context.Context, req *authpb.RefreshTokenRequest) (*authpb.RefreshTokenResponse, error) {
 	if productionMode() {
-		pid, userPath, ok := parseProductionRefreshToken(req.GetRefreshToken())
+		pid, userPath, appID, ok := parseProductionRefreshTokenWithApp(req.GetRefreshToken())
 		if !ok || req.GetUser() != userPath {
 			return nil, status.Error(codes.Unauthenticated, "invalid refresh token")
 		}
@@ -307,7 +367,7 @@ func (s *authServer) RefreshToken(ctx context.Context, req *authpb.RefreshTokenR
 		if account.PID != pid || userPath != nplnTenant+"/users/"+account.UserID {
 			return nil, status.Error(codes.PermissionDenied, "refresh account mismatch")
 		}
-		return &authpb.RefreshTokenResponse{Token: newTokenPID(pid, userPath)}, nil
+		return &authpb.RefreshTokenResponse{Token: newTokenPIDForApp(pid, userPath, appID)}, nil
 	}
 	pid, ok := callerPID(ctx)
 	if !ok || pid == 0 {
@@ -330,7 +390,7 @@ func (s *authServer) IssuePrearrangedUserToken(ctx context.Context, req *authpb.
 	user := &authpb.User{Name: userPath, ShortId: int64(req.GetUserIndex())}
 	log.Printf("[NPLN Auth] IssuePrearrangedUserToken SUCCESS tenant=%q pid=%d user=%s user_index=%d",
 		req.GetTenant(), pid, userPath, req.GetUserIndex())
-	return &authpb.IssuePrearrangedUserTokenResponse{User: user, Token: newTokenPID(pid, userPath)}, nil
+	return &authpb.IssuePrearrangedUserTokenResponse{User: user, Token: newTokenPIDForApp(pid, userPath, appIDFromExternal(req.GetExternalIdToken()))}, nil
 }
 
 func (s *authServer) IssueAnonymousUserToken(ctx context.Context, req *authpb.IssueAnonymousUserTokenRequest) (*authpb.IssueAnonymousUserTokenResponse, error) {
@@ -340,7 +400,7 @@ func (s *authServer) IssueAnonymousUserToken(ctx context.Context, req *authpb.Is
 		return nil, err
 	}
 	log.Printf("[NPLN Auth] IssueAnonymousUserToken pid=%d user=%s", pid, userPath)
-	return &authpb.IssueAnonymousUserTokenResponse{Token: newTokenPID(pid, userPath)}, nil
+	return &authpb.IssueAnonymousUserTokenResponse{Token: newTokenPIDForApp(pid, userPath, appIDFromExternal(req.GetExternalIdToken()))}, nil
 }
 
 func (s *authServer) ValidateToken(ctx context.Context, _ *emptypb.Empty) (*emptypb.Empty, error) {

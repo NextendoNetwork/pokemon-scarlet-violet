@@ -29,13 +29,14 @@ import (
 )
 
 const (
-	nplnJKU      = "jwkSets/nplnAccessToken"
-	nplnIssuer   = "default iss"
-	nplnAppID    = "01008F6008C5E000" // Pokémon Violet Title ID
-	nplnTenantID = "t-50e39f8f-lp1"   // Violet Tenant ID (50e39f8f)
-	nplnTenant   = "tenants/" + nplnTenantID
-	nplnTokenTTL = 8 * time.Hour // 28800s
-	gssTokenTTL  = 1 * time.Hour
+	nplnJKU          = "jwkSets/nplnAccessToken"
+	nplnIssuer       = "default iss"
+	nplnAppID        = "01008F6008C5E000" // Pokémon Violet Title ID
+	nplnScarletAppID = "0100A3D008C5C000"
+	nplnTenantID     = "t-50e39f8f-lp1" // Violet Tenant ID (50e39f8f)
+	nplnTenant       = "tenants/" + nplnTenantID
+	nplnTokenTTL     = 8 * time.Hour // 28800s
+	gssTokenTTL      = 1 * time.Hour
 )
 
 var (
@@ -107,6 +108,17 @@ func userIDFromPath(userPath string) string {
 }
 
 func mintNplnAccessToken(pid uint64, userPath, tenant string) string {
+	return mintNplnAccessTokenForApp(pid, userPath, tenant, nplnAppID)
+}
+
+func supportedNplnAppID(appID string) bool {
+	return appID == nplnAppID || appID == nplnScarletAppID
+}
+
+func mintNplnAccessTokenForApp(pid uint64, userPath, tenant, appID string) string {
+	if !supportedNplnAppID(appID) {
+		appID = nplnAppID
+	}
 	key, kid := nplnSigningKey()
 	if key == nil {
 		return "nextendo-npln-access." + itoa(pid)
@@ -126,7 +138,7 @@ func mintNplnAccessToken(pid uint64, userPath, tenant string) string {
 		"sub": uid,
 		"npln": map[string]any{
 			"aid":    accountIDFromUser(uid),
-			"app_id": nplnAppID,
+			"app_id": appID,
 			"authorization": map[string]any{
 				"allow":          []string{"**"},
 				"deny":           []string{},
@@ -156,6 +168,13 @@ func mintNplnAccessToken(pid uint64, userPath, tenant string) string {
 }
 
 func mintSessionToken(uid, tenant, gsName, userSess string) string {
+	return mintSessionTokenForApp(uid, tenant, gsName, userSess, nplnAppID)
+}
+
+func mintSessionTokenForApp(uid, tenant, gsName, userSess, appID string) string {
+	if !supportedNplnAppID(appID) {
+		appID = nplnAppID
+	}
 	key, kid := nplnSigningKey()
 	if key == nil {
 		return "nextendo-gss.fallback"
@@ -173,7 +192,7 @@ func mintSessionToken(uid, tenant, gsName, userSess string) string {
 		"sub": uid,
 		"npln": map[string]any{
 			"aid":    accountIDFromUser(uid),
-			"app_id": nplnAppID,
+			"app_id": appID,
 			"authorization": map[string]any{
 				"allow":          []string{"**"},
 				"deny":           []string{},
@@ -210,6 +229,13 @@ func mintSessionToken(uid, tenant, gsName, userSess string) string {
 // gamesync claim. Both public matchmaking and private session creation must
 // use this form because Gamesync.IssueToken validates these exact bindings.
 func mintGssMatchToken(uid, tenant, gsName, userSess, team, attrJSON, latencyJSON string) string {
+	return mintGssMatchTokenForApp(uid, tenant, gsName, userSess, team, attrJSON, latencyJSON, nplnAppID)
+}
+
+func mintGssMatchTokenForApp(uid, tenant, gsName, userSess, team, attrJSON, latencyJSON, appID string) string {
+	if !supportedNplnAppID(appID) {
+		appID = nplnAppID
+	}
 	key, kid := nplnSigningKey()
 	if key == nil {
 		return "nextendo-gss.fallback"
@@ -240,6 +266,9 @@ func mintGssMatchToken(uid, tenant, gsName, userSess, team, attrJSON, latencyJSO
 			"uid":  uid,
 			"usid": userIDFromPath(userSess),
 		},
+	}
+	if appID == nplnScarletAppID {
+		payload["gamesync"].(map[string]any)["app_id"] = appID
 	}
 
 	hj, _ := json.Marshal(header)

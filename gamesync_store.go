@@ -782,6 +782,11 @@ func (g *gamesyncServer) WriteDocuments(ctx context.Context, req *gspb.WriteDocu
 	}
 	g.mu.Unlock()
 	names := []string{}
+	if changed["docs/__gs/m"] && g.registry != nil {
+		if control := docs["docs/__gs/m"]; control != nil {
+			g.registry.updateRoomControl(session.GameSession, control.Fields)
+		}
+	}
 	for name := range changed {
 		names = append(names, name)
 	}
@@ -824,7 +829,7 @@ func (g *gamesyncServer) streamEnded(id string) {
 	last := g.streamCounts[id] <= 0
 	g.mu.Unlock()
 	if last {
-		g.scheduleDisconnect(id, envDuration("NPLN_RECONNECT_GRACE", 30*time.Second))
+		g.scheduleDisconnect(id, 0)
 	}
 }
 func (g *gamesyncServer) scheduleDisconnect(id string, delay time.Duration) {
@@ -887,6 +892,26 @@ func (g *gamesyncServer) expireSession(id string, timer *time.Timer) {
 	g.mu.Unlock()
 	if g.registry != nil {
 		g.registry.depart(session.GameSession, session.UserSession)
+		if g.registry.raidNeedsReopen(session.GameSession) {
+			g.mu.Lock()
+			control := g.documents[session.GameSession]["docs/__gs/m"]
+			if control != nil {
+				control = proto.Clone(control).(*gspb.Document)
+				control.Fields = cloneFields(control.Fields)
+				control.Fields.Fields["cp"] = &commonpb.Value{ValueType: &commonpb.Value_BooleanValue{BooleanValue: true}}
+				control.Fields.Fields["ip"] = &commonpb.Value{ValueType: &commonpb.Value_BooleanValue{BooleanValue: true}}
+				control.Fields.Fields["ebf"] = &commonpb.Value{ValueType: &commonpb.Value_BooleanValue{BooleanValue: false}}
+				control.UpdateTime = timestamppb.Now()
+				g.documents[session.GameSession][control.Name] = control
+			}
+			g.mu.Unlock()
+			if control != nil {
+				g.registry.updateRoomControl(session.GameSession, control.Fields)
+				for _, s := range subscribers {
+					_ = s.publish(proto.Clone(control).(*gspb.Document))
+				}
+			}
+		}
 	}
 	for name := range deleted {
 		for _, s := range subscribers {

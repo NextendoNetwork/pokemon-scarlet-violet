@@ -1185,6 +1185,10 @@ func marshalVioletCompetitionApplicationData(rulePreset, controlTime, totalTime 
 }
 
 func marshalOfficialCompetition(name string, now time.Time) ([]byte, error) {
+	return marshalOfficialCompetitionForArea(name, now, 399)
+}
+
+func marshalOfficialCompetitionForArea(name string, now time.Time, area uint64) ([]byte, error) {
 	// Official Rules 1 selects local preset 10. Unlike the friendly-host detail
 	// screen, the official-search callback immediately constructs a regulation
 	// holder and requires the complete native 0x29c0-byte record under the
@@ -1202,7 +1206,12 @@ func marshalOfficialCompetition(name string, now time.Time) ([]byte, error) {
 	out = appendVarintField(out, 8, 3) // ANYBODY.
 	out = appendVarintField(out, 9, 1) // OWNER.
 	out = appendVarintField(out, 10, 1)
-	out = appendBytesField(out, 11, protowire.AppendVarint(nil, 399))
+	// Violet filters this competition against the CompetitionUser's selected
+	// location. A fixed area hid the event after other region selections.
+	if area == 0 {
+		area = 399 // default until the user selects a location
+	}
+	out = appendBytesField(out, 11, protowire.AppendVarint(nil, area))
 	out = appendBytesField(out, 34, []byte{1, 2, 3})
 	out = appendVarintField(out, 14, 1)
 	out = appendVarintField(out, 15, 100000)
@@ -1237,7 +1246,7 @@ func marshalOfficialCompetition(name string, now time.Time) ([]byte, error) {
 }
 
 func (s *competitionServer) GetCompetition(ctx context.Context, message *rawMsg) (*rawMsg, error) {
-	_, err := authenticatedNPLNUID(ctx)
+	uid, err := authenticatedNPLNUID(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -1256,7 +1265,10 @@ func (s *competitionServer) GetCompetition(ctx context.Context, message *rawMsg)
 		}
 	}
 	if officialName, officialErr := canonicalOfficialCompetitionName(name); officialErr == nil {
-		competition, err := marshalOfficialCompetition(officialName, time.Now().UTC())
+		s.mu.Lock()
+		area := s.users[uid].area
+		s.mu.Unlock()
+		competition, err := marshalOfficialCompetitionForArea(officialName, time.Now().UTC(), area)
 		if err != nil {
 			return nil, status.Error(codes.FailedPrecondition, err.Error())
 		}
@@ -1292,7 +1304,8 @@ func (s *competitionServer) GetCompetition(ctx context.Context, message *rawMsg)
 }
 
 func (s *competitionServer) SearchCompetitions(ctx context.Context, message *rawMsg) (*rawMsg, error) {
-	if _, err := authenticatedNPLNUID(ctx); err != nil {
+	uid, err := authenticatedNPLNUID(ctx)
+	if err != nil {
 		return nil, err
 	}
 	request, err := parseSearchCompetitionsRequest(message.b)
@@ -1300,7 +1313,10 @@ func (s *competitionServer) SearchCompetitions(ctx context.Context, message *raw
 		return nil, err
 	}
 	if len(request.types) == 1 && request.types[0] == 1 {
-		competition, err := marshalOfficialCompetition(officialCompetitionName(), time.Now().UTC())
+		s.mu.Lock()
+		area := s.users[uid].area
+		s.mu.Unlock()
+		competition, err := marshalOfficialCompetitionForArea(officialCompetitionName(), time.Now().UTC(), area)
 		if err != nil {
 			return nil, status.Error(codes.FailedPrecondition, err.Error())
 		}

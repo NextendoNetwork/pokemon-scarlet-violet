@@ -24,7 +24,8 @@ type violetUgcstoreServer struct {
 	mu sync.Mutex
 	// Local UGC aliases are not bearer identities. Isolate storage by verified
 	// caller, including when copied saves supply the same opaque alias.
-	penalties map[string]*ugcpb.Document
+	penalties      map[string]*ugcpb.Document
+	penaltyAliases map[string]map[string]bool
 	// Rental documents are public through short aliases, but only the caller
 	// that first publishes a slot may update or delete it.
 	rentalDocuments map[string]*ugcpb.Document
@@ -38,6 +39,9 @@ func canonicalVioletUGCName(name string) string {
 }
 
 func (u *violetUgcstoreServer) ensureMapsLocked() {
+	if u.penaltyAliases == nil {
+		u.penaltyAliases = make(map[string]map[string]bool)
+	}
 	if u.penalties == nil {
 		u.penalties = make(map[string]*ugcpb.Document)
 	}
@@ -138,10 +142,13 @@ func (u *violetUgcstoreServer) GetDocument(ctx context.Context, req *ugcpb.GetDo
 	if !validVioletPenaltyDocumentName(req.GetName()) {
 		return nil, status.Error(codes.Unimplemented, "only Violet's observed UGC documents are available")
 	}
+	// Saves can carry different opaque aliases for the same authenticated account.
+	// Keep one penalty state per bearer UID and remember only aliases read by that UID.
+	if u.penaltyAliases[uid] == nil {
+		u.penaltyAliases[uid] = make(map[string]bool)
+	}
+	u.penaltyAliases[uid][name] = true
 	if stored := u.penalties[uid]; stored != nil {
-		if stored.Name != name {
-			return nil, status.Error(codes.PermissionDenied, "penalty alias differs from caller binding")
-		}
 		out := proto.Clone(stored).(*ugcpb.Document)
 		out.Name = req.Name
 		return out, nil
@@ -299,10 +306,11 @@ func (u *violetUgcstoreServer) CommitDocuments(ctx context.Context, req *ugcpb.C
 			"warning_flag":     {ValueType: &commonpb.Value_BooleanValue{BooleanValue: false}},
 		}}}
 	}
-	if stored.Name != name {
+	if stored.Name != name && !u.penaltyAliases[uid][name] {
 		return nil, status.Error(codes.PermissionDenied, "read and bind caller penalty document before updating")
 	}
 	out := proto.Clone(stored).(*ugcpb.Document)
+	out.Name = name
 	for _, key := range paths {
 		out.Fields.Fields[key] = proto.Clone(fields[key]).(*commonpb.Value)
 	}

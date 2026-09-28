@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/binary"
 	"fmt"
 	"log"
 	"net"
@@ -23,6 +24,21 @@ type turnServer struct {
 	server  *turn.Server
 	address net.Addr
 	once    sync.Once
+}
+
+// Violet's older TURN client negotiates channels over UDP. RFC 8656 permits
+// ChannelData padding on UDP but does not require it. Send only the declared
+// payload length so peers with strict datagram framing can consume it.
+type unpaddedTURNPacketConn struct{ net.PacketConn }
+
+func (c unpaddedTURNPacketConn) WriteTo(packet []byte, addr net.Addr) (int, error) {
+	if len(packet) >= 4 && packet[0]&0xc0 == 0x40 {
+		payloadLength := int(binary.BigEndian.Uint16(packet[2:4]))
+		if payloadLength <= len(packet)-4 && len(packet) <= 4+payloadLength+3 {
+			packet = packet[:4+payloadLength]
+		}
+	}
+	return c.PacketConn.WriteTo(packet, addr)
 }
 
 func startTURN(recorder *probeRecorder, listenAddress, relayAddress, username, password, realm string) (*turnServer, error) {
@@ -69,7 +85,7 @@ func startTURN(recorder *probeRecorder, listenAddress, relayAddress, username, p
 			return key, candidate == username && candidateRealm == realm
 		},
 		PacketConnConfigs: []turn.PacketConnConfig{{
-			PacketConn:            conn,
+			PacketConn:            unpaddedTURNPacketConn{conn},
 			RelayAddressGenerator: relayGenerator,
 		}},
 		EventHandler: turn.EventHandler{

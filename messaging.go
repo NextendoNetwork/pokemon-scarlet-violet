@@ -27,7 +27,16 @@ type nplnCallerClaims struct {
 	Subject   string `json:"sub"`
 	NPLN      struct {
 		TenantID string `json:"tid"`
+		AppID    string `json:"app_id"`
 	} `json:"npln"`
+}
+
+func callerAppID(ctx context.Context) string {
+	claims, err := authenticatedNplnCaller(ctx)
+	if err == nil && supportedNplnAppID(claims.NPLN.AppID) {
+		return claims.NPLN.AppID
+	}
+	return nplnAppID
 }
 
 func authenticatedNplnCaller(ctx context.Context) (*nplnCallerClaims, error) {

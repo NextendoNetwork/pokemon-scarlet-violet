@@ -1,6 +1,6 @@
 package main
 
-// Nextendo NPLN Server — Pokémon Violet (Title ID: 01008F6008C5E000, Tenant: t-50e39f8f-lp1)
+// Nextendo NPLN Server — Pokémon Scarlet/Violet (Tenant: t-50e39f8f-lp1)
 //
 // Experimental clean-room backend and protocol probe. Registered service
 // surfaces are partial until Violet traffic demonstrates the required behavior.
@@ -162,7 +162,7 @@ func main() {
 		fatalf("production configuration: %v", err)
 	}
 	log.Printf("================================================================")
-	log.Printf(" Nextendo NPLN Server — Pokémon Violet [01008F6008C5E000]")
+	log.Printf(" Nextendo NPLN Server — Pokémon Scarlet/Violet [0100A3D008C5C000 / 01008F6008C5E000]")
 	log.Printf(" Tenant ID: %s | Server ID: 50e39f8f", nplnTenantID)
 	log.Printf("================================================================")
 

@@ -11,6 +11,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
+	commonpb "npln.nintendo.net/npln-practice/proto/common"
 	mmpb "npln.nintendo.net/npln-practice/proto/matchmaking/v1"
 )
 
@@ -113,7 +114,11 @@ func (r *sessionRegistry) depart(gameSession, userSession string) {
 		return
 	}
 	users := gs.UserSessions[:0]
+	hostDeparted := false
 	for _, u := range gs.UserSessions {
+		if lastResourceSegment(u.Name) == lastResourceSegment(userSession) && u.Team == "owner" {
+			hostDeparted = true
+		}
 		if lastResourceSegment(u.Name) != lastResourceSegment(userSession) {
 			users = append(users, u)
 		}
@@ -130,8 +135,33 @@ func (r *sessionRegistry) depart(gameSession, userSession string) {
 		pooled.members = members
 	}
 	// Keep the object as a tombstone for old tickets; it is never selectable.
-	if len(users) == 0 {
+	if len(users) == 0 || (hostDeparted && r.configs[gs.Name] == "RaidPublic") {
 		gs.CanParticipate = false
 		gs.State = mmpb.GameSession_TERMINATED
+	}
+}
+
+func (r *sessionRegistry) raidNeedsReopen(gameSession string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	gs := r.sessions[lastResourceSegment(gameSession)]
+	return gs != nil && r.configs[gs.Name] == "RaidPublic" && gs.State == mmpb.GameSession_ACTIVE &&
+		len(gs.UserSessions) == 1 && gs.UserSessions[0].Team == "owner" && !gs.CanParticipate
+}
+
+// Applied after a successful atomic Gamesync commit. Discovery and random
+// matchmaking read these same flags under the registry mutex.
+func (r *sessionRegistry) updateRoomControl(name string, fields *commonpb.MapValue) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	gs := r.sessions[lastResourceSegment(name)]
+	if gs == nil || gs.State != mmpb.GameSession_ACTIVE {
+		return
+	}
+	if v, ok := fields.GetFields()["cp"].GetValueType().(*commonpb.Value_BooleanValue); ok {
+		gs.CanParticipate = v.BooleanValue
+	}
+	if v, ok := fields.GetFields()["ip"].GetValueType().(*commonpb.Value_BooleanValue); ok {
+		gs.IsPublic = v.BooleanValue
 	}
 }
