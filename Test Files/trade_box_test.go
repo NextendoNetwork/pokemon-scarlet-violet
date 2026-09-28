@@ -111,6 +111,65 @@ func TestTimberTradeBoxPairsDifferentOwnersAndCrossesPayloads(t *testing.T) {
 	}
 }
 
+func TestTimberTradeBoxSameAccountDifferentTitlesRemainSeparate(t *testing.T) {
+	server := newTradeBoxServer()
+	owner := "u-both-games"
+	name := "tenants/current/users/current/tradeBoxes/0"
+	create := func(ctx context.Context, payload string) {
+		t.Helper()
+		_, err := server.CreateTradeBox(ctx, &rawMsg{b: createTradeBoxWire(
+			"tenants/current/users/current", "0",
+			timberTradeBox{Payload: []byte(payload), Signature: []byte("sig-" + payload)},
+		)})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	create(violetAuthenticatedContext(owner), "violet-pokemon")
+	scarletBefore, err := server.trackForOwnerApp(owner, nplnScarletAppID, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scarletBefore.created {
+		t.Fatal("Scarlet saw Violet's pending offer")
+	}
+	create(scarletAuthenticatedContext(owner), "scarlet-pokemon")
+	if server.boxes[tradeBoxStorageKeyForApp(owner, nplnAppID, "0")] ==
+		server.boxes[tradeBoxStorageKeyForApp(owner, nplnScarletAppID, "0")] {
+		t.Fatal("Scarlet and Violet share a trade-box entry")
+	}
+	if server.boxes[tradeBoxStorageKeyForApp(owner, nplnAppID, "0")].matched ||
+		server.boxes[tradeBoxStorageKeyForApp(owner, nplnScarletAppID, "0")].matched {
+		t.Fatal("same-account offers matched each other")
+	}
+
+	create(violetAuthenticatedContext("u-friend"), "friend-pokemon")
+	violet, err := server.lookupOwnedForApp(owner, nplnAppID, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scarlet, err := server.lookupOwnedForApp(owner, nplnScarletAppID, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	friend, err := server.lookupOwnedForApp("u-friend", nplnAppID, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !violet.matched || !friend.matched || scarlet.matched ||
+		!bytes.Equal(violet.result.Payload, []byte("friend-pokemon")) ||
+		!bytes.Equal(friend.result.Payload, []byte("violet-pokemon")) ||
+		len(scarlet.result.Payload) != 0 {
+		t.Fatal("friend's trade was delivered to the wrong title")
+	}
+
+	create(violetAuthenticatedContext("u-other-friend"), "other-pokemon")
+	if !scarlet.matched || !bytes.Equal(scarlet.result.Payload, []byte("other-pokemon")) {
+		t.Fatal("Scarlet's independent offer did not pair later")
+	}
+}
+
 func TestTimberTradeBoxOwnershipAndCancellation(t *testing.T) {
 	server := newTradeBoxServer()
 	box, err := server.createForOwner("u-owner", createTradeBoxRequest{

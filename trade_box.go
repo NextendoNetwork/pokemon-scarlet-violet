@@ -322,6 +322,7 @@ func marshalTrackTradeBoxResponse(box *timberTradeBox, missing bool, keepAlive t
 
 type tradeBoxEntry struct {
 	owner    string
+	appID    string
 	box      timberTradeBox
 	result   timberTradeBox
 	created  bool
@@ -337,7 +338,11 @@ type tradeBoxServer struct {
 }
 
 func tradeBoxStorageKey(owner, id string) string {
-	return owner + "\x00" + id
+	return tradeBoxStorageKeyForApp(owner, nplnAppID, id)
+}
+
+func tradeBoxStorageKeyForApp(owner, appID, id string) string {
+	return owner + "\x00" + appID + "\x00" + id
 }
 
 func newTradeBoxServer() *tradeBoxServer {
@@ -372,6 +377,10 @@ func (s *tradeBoxServer) signalLocked(entry *tradeBoxEntry) {
 }
 
 func (s *tradeBoxServer) createForOwner(owner string, req createTradeBoxRequest) (timberTradeBox, error) {
+	return s.createForOwnerApp(owner, nplnAppID, req)
+}
+
+func (s *tradeBoxServer) createForOwnerApp(owner, appID string, req createTradeBoxRequest) (timberTradeBox, error) {
 	if !validTradeBoxParent(req.Parent, owner) {
 		return timberTradeBox{}, status.Error(codes.InvalidArgument, "invalid Violet trade-box parent")
 	}
@@ -388,7 +397,7 @@ func (s *tradeBoxServer) createForOwner(owner string, req createTradeBoxRequest)
 	}
 	parent := strings.TrimSuffix(req.Parent, "/tradeBoxes")
 	name := parent + "/tradeBoxes/" + id
-	storageKey := tradeBoxStorageKey(owner, id)
+	storageKey := tradeBoxStorageKeyForApp(owner, appID, id)
 	now := time.Now().UTC()
 	box := cloneTimberTradeBox(req.TradeBox)
 	box.Name, box.State, box.Timestamp = name, tradeBoxTrading, now
@@ -399,7 +408,7 @@ func (s *tradeBoxServer) createForOwner(owner string, req createTradeBoxRequest)
 		return timberTradeBox{}, status.Error(codes.AlreadyExists, "trade box already exists")
 	}
 	if entry == nil {
-		entry = &tradeBoxEntry{owner: owner, notify: make(chan struct{}, 1)}
+		entry = &tradeBoxEntry{owner: owner, appID: appID, notify: make(chan struct{}, 1)}
 		s.boxes[storageKey] = entry
 	}
 	entry.box = box
@@ -439,8 +448,12 @@ func (s *tradeBoxServer) createForOwner(owner string, req createTradeBoxRequest)
 }
 
 func (s *tradeBoxServer) lookupOwned(owner, name string) (*tradeBoxEntry, error) {
+	return s.lookupOwnedForApp(owner, nplnAppID, name)
+}
+
+func (s *tradeBoxServer) lookupOwnedForApp(owner, appID, name string) (*tradeBoxEntry, error) {
 	id := lastResourceSegment(name)
-	storageKey := tradeBoxStorageKey(owner, id)
+	storageKey := tradeBoxStorageKeyForApp(owner, appID, id)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	entry := s.boxes[storageKey]
@@ -457,6 +470,10 @@ func (s *tradeBoxServer) lookupOwned(owner, name string) (*tradeBoxEntry, error)
 // CreateTradeBox. Scarlet/Violet opens the server stream first and only creates
 // the resource after that stream remains healthy.
 func (s *tradeBoxServer) trackForOwner(owner, name string) (*tradeBoxEntry, error) {
+	return s.trackForOwnerApp(owner, nplnAppID, name)
+}
+
+func (s *tradeBoxServer) trackForOwnerApp(owner, appID, name string) (*tradeBoxEntry, error) {
 	if err := validateTradeBoxResourceName(name); err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
@@ -464,20 +481,24 @@ func (s *tradeBoxServer) trackForOwner(owner, name string) (*tradeBoxEntry, erro
 	if (parts[3] != "current" && parts[3] != owner) || !validTradeBoxID(parts[5]) {
 		return nil, status.Error(codes.InvalidArgument, "invalid Violet trade-box resource")
 	}
-	storageKey := tradeBoxStorageKey(owner, parts[5])
+	storageKey := tradeBoxStorageKeyForApp(owner, appID, parts[5])
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	entry := s.boxes[storageKey]
 	if entry == nil || entry.canceled {
-		entry = &tradeBoxEntry{owner: owner, box: timberTradeBox{Name: name}, notify: make(chan struct{}, 1)}
+		entry = &tradeBoxEntry{owner: owner, appID: appID, box: timberTradeBox{Name: name}, notify: make(chan struct{}, 1)}
 		s.boxes[storageKey] = entry
 	}
 	return entry, nil
 }
 
 func (s *tradeBoxServer) cancelForOwner(owner, name string, remove bool) error {
+	return s.cancelForOwnerApp(owner, nplnAppID, name, remove)
+}
+
+func (s *tradeBoxServer) cancelForOwnerApp(owner, appID, name string, remove bool) error {
 	id := lastResourceSegment(name)
-	storageKey := tradeBoxStorageKey(owner, id)
+	storageKey := tradeBoxStorageKeyForApp(owner, appID, id)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	entry := s.boxes[storageKey]
@@ -507,11 +528,12 @@ func (s *tradeBoxServer) CreateTradeBox(ctx context.Context, message *rawMsg) (*
 	if err != nil {
 		return nil, err
 	}
-	box, err := s.createForOwner(owner, req)
+	appID := callerAppID(ctx)
+	box, err := s.createForOwnerApp(owner, appID, req)
 	if err != nil {
 		return nil, err
 	}
-	log.Printf("[NPLN Timber] CreateTradeBox name=%q owner=%q payload_bytes=%d signature_bytes=%d", box.Name, owner, len(box.Payload), len(box.Signature))
+	log.Printf("[NPLN Timber] CreateTradeBox name=%q owner=%q app_id=%q payload_bytes=%d signature_bytes=%d", box.Name, owner, appID, len(box.Payload), len(box.Signature))
 	return &rawMsg{b: marshalTimberTradeBox(box)}, nil
 }
 
@@ -524,7 +546,7 @@ func (s *tradeBoxServer) DeleteTradeBox(ctx context.Context, message *rawMsg) (*
 	if err != nil {
 		return nil, err
 	}
-	if err := s.cancelForOwner(owner, name, true); err != nil {
+	if err := s.cancelForOwnerApp(owner, callerAppID(ctx), name, true); err != nil {
 		return nil, err
 	}
 	log.Printf("[NPLN Timber] DeleteTradeBox name=%q owner=%q", name, owner)
@@ -540,7 +562,7 @@ func (s *tradeBoxServer) CancelTradeBox(ctx context.Context, message *rawMsg) (*
 	if err != nil {
 		return nil, err
 	}
-	if err := s.cancelForOwner(owner, name, false); err != nil {
+	if err := s.cancelForOwnerApp(owner, callerAppID(ctx), name, false); err != nil {
 		return nil, err
 	}
 	log.Printf("[NPLN Timber] CancelTradeBox name=%q owner=%q", name, owner)
@@ -556,11 +578,12 @@ func (s *tradeBoxServer) TrackTradeBox(message *rawMsg, stream grpc.ServerStream
 	if err != nil {
 		return err
 	}
-	entry, err := s.trackForOwner(owner, name)
+	appID := callerAppID(stream.Context())
+	entry, err := s.trackForOwnerApp(owner, appID, name)
 	if err != nil {
 		return err
 	}
-	log.Printf("[NPLN Timber] TrackTradeBox name=%q owner=%q", name, owner)
+	log.Printf("[NPLN Timber] TrackTradeBox name=%q owner=%q app_id=%q", name, owner, appID)
 
 	s.mu.Lock()
 	if entry.created && entry.matched {
