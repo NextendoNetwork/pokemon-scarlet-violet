@@ -105,7 +105,7 @@ func matchmakingSessionProperties(config string) *commonpb.MapValue {
 const violetUnionCircleConfig = "TeamCircle"
 
 func validateVioletMatchmakingConfig(config string) error {
-	if lastResourceSegment(config) != violetUnionCircleConfig && lastResourceSegment(config) != "RaidPublic" && lastResourceSegment(config) != "RaidPrivate" && !violetPairConfig(config) {
+	if lastResourceSegment(config) != violetUnionCircleConfig && lastResourceSegment(config) != "RaidPublic" && lastResourceSegment(config) != "RaidPrivate" && !violetCodedConfig(config) {
 		return status.Errorf(codes.Unimplemented, "matchmaking configuration %q is not part of the observed Violet contract", lastResourceSegment(config))
 	}
 	return nil
@@ -145,9 +145,9 @@ func (m *matchmakerServer) CreateMatchmakingTicket(ctx context.Context, req *mmp
 	if err := validateCallerDefinitions(t.GetUserDefinitions(), uid); err != nil {
 		return nil, err
 	}
-	if violetPairConfig(t.MatchmakingConfig) {
+	if violetCodedConfig(t.MatchmakingConfig) {
 		if len(t.UserDefinitions) != 1 {
-			return nil, status.Error(codes.InvalidArgument, "pair matchmaking requires one caller")
+			return nil, status.Error(codes.InvalidArgument, "coded matchmaking requires one caller")
 		}
 		if password := t.UserDefinitions[0].GetAttributes().GetFields()["password"]; password != nil {
 			if _, ok := password.ValueType.(*commonpb.Value_StringValue); !ok {
@@ -179,7 +179,7 @@ func publicMatchPoolKey(ticket *mmpb.MatchmakingTicket) string {
 		// and Doubles. Keep those queues isolated by Violet's observed mode
 		// attribute (0 = Single); missing mode remains its own zero queue.
 		key += fmt.Sprintf("\x00mode=%d", ticket.UserDefinitions[0].GetAttributes().GetFields()["mode"].GetIntegerValue())
-	} else if violetPairConfig(key) && len(ticket.UserDefinitions) > 0 {
+	} else if violetCodedConfig(key) && len(ticket.UserDefinitions) > 0 {
 		key += "\x00" + ticket.UserDefinitions[0].GetAttributes().GetFields()["password"].GetStringValue()
 	}
 	return key
@@ -190,7 +190,14 @@ func violetPairConfig(config string) bool {
 	return name == "BoxTrade" || name == "NbrSingle" || name == "CasualBattle" || name == "RankBattle" || name == "Competition"
 }
 
+func violetCodedConfig(config string) bool {
+	return violetPairConfig(config) || lastResourceSegment(config) == "NbrMulti"
+}
+
 func publicMatchCapacity(config string) int32 {
+	if lastResourceSegment(config) == "NbrMulti" {
+		return 4
+	}
 	if violetPairConfig(config) {
 		return 2
 	}
@@ -456,14 +463,14 @@ func (m *matchmakerServer) completeMatchmakingTicket(ctx context.Context, reques
 		addPublicMatchMembers(session, stored, uid, callerAppID(ctx), now)
 		m.ticketSessions[ticketID] = session
 	}
-	if violetPairConfig(stored.MatchmakingConfig) && session.gameSession.CurrentParticipantCount < 2 {
+	if violetCodedConfig(stored.MatchmakingConfig) && session.gameSession.CurrentParticipantCount < publicMatchCapacity(stored.MatchmakingConfig) {
 		pending := proto.Clone(stored).(*mmpb.MatchmakingTicket)
 		pending.State = mmpb.MatchmakingTicket_SEARCHING
 		pending.GameSession = nil
 		pending.MatchedUserSessions = nil
 		return pending, true
 	}
-	if violetPairConfig(stored.MatchmakingConfig) {
+	if violetCodedConfig(stored.MatchmakingConfig) {
 		session.gameSession.CanParticipate = false
 	}
 	return publicMatchResponse(stored, session, uid, includeUsers), true
@@ -487,7 +494,7 @@ func (m *matchmakerServer) TrackMatchmakingTicket(req *mmpb.TrackMatchmakingTick
 	defer func() {
 		m.mu.Lock()
 		defer m.mu.Unlock()
-		m.cancelPendingPairLocked(ticketID)
+		m.cancelPendingCodedMatchLocked(ticketID)
 		// A random raid search can finish without a host when the client
 		// cancels the stream. Do not retain that unmatched ticket.
 		if pending := m.tickets[ticketID]; pending != nil &&
@@ -571,7 +578,7 @@ func (m *matchmakerServer) CancelMatchmakingTicket(ctx context.Context, req *mmp
 		m.mu.Unlock()
 		return nil, status.Error(codes.PermissionDenied, "ticket does not belong to caller")
 	}
-	m.cancelPendingPairLocked(id)
+	m.cancelPendingCodedMatchLocked(id)
 	delete(m.tickets, id)
 	m.mu.Unlock()
 
@@ -579,15 +586,36 @@ func (m *matchmakerServer) CancelMatchmakingTicket(ctx context.Context, req *mmp
 	return &emptypb.Empty{}, nil
 }
 
-// A waiting pair has no Gamesync connection yet to remove its membership.
-func (m *matchmakerServer) cancelPendingPairLocked(id string) {
+// A waiting coded match has no Gamesync connection yet. Release only the
+// canceling member so the other searchers can still form a complete group.
+func (m *matchmakerServer) cancelPendingCodedMatchLocked(id string) {
 	ticket := m.tickets[id]
 	session := m.ticketSessions[id]
-	if ticket != nil && violetPairConfig(ticket.MatchmakingConfig) && session != nil && session.gameSession.CurrentParticipantCount < 2 {
+	if ticket == nil || !violetCodedConfig(ticket.MatchmakingConfig) || session == nil ||
+		session.gameSession.CurrentParticipantCount >= publicMatchCapacity(ticket.MatchmakingConfig) {
+		return
+	}
+	uid := userIDFromPath(ticket.UserDefinitions[0].GetUser())
+	members := session.members[:0]
+	for _, member := range session.members {
+		if userIDFromPath(member.definition.GetUser()) != uid {
+			members = append(members, member)
+		}
+	}
+	session.members = members
+	users := session.gameSession.UserSessions[:0]
+	for _, user := range session.gameSession.UserSessions {
+		if userIDFromPath(user.GetUser()) != uid {
+			users = append(users, user)
+		}
+	}
+	session.gameSession.UserSessions = users
+	session.gameSession.CurrentParticipantCount = int32(len(users))
+	delete(m.ticketSessions, id)
+	delete(m.tickets, id)
+	if len(users) == 0 {
 		session.gameSession.State = mmpb.GameSession_TERMINATED
 		session.gameSession.CanParticipate = false
-		delete(m.ticketSessions, id)
-		delete(m.tickets, id)
 	}
 }
 
