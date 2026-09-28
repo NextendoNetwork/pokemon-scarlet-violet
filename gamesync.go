@@ -28,6 +28,8 @@ import (
 
 type gamesyncSession struct {
 	UID         string
+	AppID       string
+	IP          string
 	GameSession string
 	UserSession string
 	Team        string
@@ -460,6 +462,8 @@ func (g *gamesyncServer) IssueToken(ctx context.Context, req *gspb.IssueTokenReq
 	accessToken := mintSessionTokenForApp(claims.Subject, nplnTenant, gameSession, requestedUserSession, claims.Game.AppID)
 	g.rememberSession(gamesyncSession{
 		UID:         claims.Subject,
+		AppID:       dashboardAppID(claims.Game.AppID),
+		IP:          dashboardPeerIP(ctx),
 		GameSession: gameSession,
 		UserSession: requestedUserSession,
 		Team:        claims.Game.Team,

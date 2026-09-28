@@ -171,6 +171,7 @@ func (s *friendsServer) SubscribeFriendUsers(req *friendspb.SubscribeFriendUsers
 // Presence Server
 type presenceServer struct {
 	friendspb.UnimplementedPresenceServiceServer
+	dashboard *gameDashboard
 }
 
 var presenceHeartbeatExtra = protoreflect.RawFields([]byte{0x12, 0x02, 0x08, 0x32})
@@ -183,6 +184,9 @@ func presenceHeartbeat() *friendspb.Heartbeat {
 
 func (p *presenceServer) KeepAlive(stream grpc.BidiStreamingServer[friendspb.KeepAliveRequest, friendspb.KeepAliveResponse]) error {
 	ctx := stream.Context()
+	if p.dashboard != nil {
+		defer p.dashboard.trackPresence(ctx)()
+	}
 	log.Printf("[NPLN Presence] KeepAlive stream opened")
 
 	ticker := time.NewTicker(30 * time.Second)
@@ -202,6 +206,9 @@ func (p *presenceServer) KeepAlive(stream grpc.BidiStreamingServer[friendspb.Kee
 
 func (p *presenceServer) SubscribePresences(req *friendspb.SubscribePresencesRequest, stream grpc.ServerStreamingServer[friendspb.SubscribePresencesResponse]) error {
 	ctx := stream.Context()
+	if p.dashboard != nil {
+		defer p.dashboard.trackPresence(ctx)()
+	}
 	log.Printf("[NPLN Presence] SubscribePresences user=%q", req.GetUser())
 
 	// Send initial heartbeat

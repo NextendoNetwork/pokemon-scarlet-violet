@@ -119,11 +119,15 @@ func buildServer(creds credentials.TransportCredentials) *grpc.Server {
 	ranked := newRankedStore(envOr("VIOLET_RANKED_STATE_FILE", "ranked-state.json"))
 	gamesync := newGamesyncServer(sessions)
 	gamesync.ranked = ranked
+	dashboard := newGameDashboard(gamesync)
+	if err := dashboard.listenFromEnvironment(); err != nil {
+		fatalf("dashboard: %v", err)
+	}
 
 	// Register Core NPLN Services
 	authpb.RegisterAuthServer(s, &authServer{})
 	friendspb.RegisterFriendsServer(s, &friendsServer{})
-	friendspb.RegisterPresenceServiceServer(s, &presenceServer{})
+	friendspb.RegisterPresenceServiceServer(s, &presenceServer{dashboard: dashboard})
 	gspb.RegisterGamesyncServer(s, gamesync)
 	hydropb.RegisterDatastoreServer(s, newDatastoreServer())
 	mmpb.RegisterMatchmakerServer(s, newMatchmaker(sessions))
