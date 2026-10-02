@@ -54,3 +54,8 @@ Ryujinx profile. The repository includes neither a template nor gift binaries.
 
 Based on [Nextendo Network](https://github.com/NextendoNetwork)'s service
 layout and public NPLN protocol definitions. See `LICENSE` for terms.
+
+## License
+
+Released under the **[PolyForm Shield License 1.0.0](LICENSE)**, source-available: read, use,
+modify, and self-host, but do not use it to provide a product that competes with Nextendo Network.
